@@ -6,7 +6,7 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from hugbucket.admin.store import ConfigStore, AppConfig, TokenConfig
 
@@ -238,13 +238,6 @@ class TokenPool:
             t.healthy for t in self._config.tokens
         )
 
-    @property
-    def admin_port(self) -> int:
-        return self._config.admin_port
-
-    @property
-    def admin_host(self) -> str:
-        return self._config.admin_host
 
 
 def _mask_token(token: str) -> str:

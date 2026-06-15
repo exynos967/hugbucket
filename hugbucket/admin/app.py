@@ -1,50 +1,13 @@
-"""Admin web panel for HugBucket — token management + bucket usage dashboard."""
+"""Admin API handlers — token management + bucket usage dashboard."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-from pathlib import Path
 
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
-
-_TPL_DIR = Path(__file__).resolve().parent
-
-
-def create_admin_app(
-    bridge,
-    token_pool,
-    config,
-) -> web.Application:
-    """Create the admin management aiohttp application."""
-
-    app = web.Application()
-    app["bridge"] = bridge
-    app["token_pool"] = token_pool
-    app["config"] = config
-
-    # -- API routes ----------------------------------------------------------
-    app.router.add_get("/api/status", handle_status)
-    app.router.add_get("/api/tokens", handle_list_tokens)
-    app.router.add_post("/api/tokens", handle_add_token)
-    app.router.add_delete("/api/tokens/{index}", handle_remove_token)
-    app.router.add_post("/api/tokens/{index}/resolve", handle_resolve_token)
-    app.router.add_get("/api/buckets", handle_list_buckets)
-    app.router.add_get("/api/buckets/{namespace}/{name}", handle_bucket_detail)
-
-    # -- Static UI -----------------------------------------------------------
-    # Serve the SPA dashboard at /
-    async def index(_request: web.Request) -> web.Response:
-        html = (_TPL_DIR / "dashboard.html").read_text(encoding="utf-8")
-        return web.Response(text=html, content_type="text/html; charset=utf-8")
-
-    app.router.add_get("/", index)
-
-    logger.info("Admin panel routes registered")
-    return app
 
 
 # -- helpers ----------------------------------------------------------------
@@ -70,8 +33,7 @@ async def handle_status(request: web.Request) -> web.Response:
     return _json(
         {
             "server": {
-                "s3_port": config.port,
-                "admin_port": pool.admin_port,
+                "port": config.port,
                 "hf_endpoint": config.hf_endpoint,
             },
             "token_pool": {

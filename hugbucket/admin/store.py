@@ -26,8 +26,6 @@ class TokenConfig:
 class AppConfig:
     tokens: list[TokenConfig] = field(default_factory=list)
     load_balance_strategy: str = "round_robin"
-    admin_port: int = 9001
-    admin_host: str = "0.0.0.0"
 
 
 class ConfigStore:
@@ -68,8 +66,6 @@ class ConfigStore:
                 load_balance_strategy=data.get(
                     "load_balance_strategy", "round_robin"
                 ),
-                admin_port=data.get("admin_port", 9001),
-                admin_host=data.get("admin_host", "0.0.0.0"),
             )
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.error("Failed to parse tokens file: %s", e)
@@ -89,8 +85,6 @@ class ConfigStore:
                 for t in config.tokens
             ],
             "load_balance_strategy": config.load_balance_strategy,
-            "admin_port": config.admin_port,
-            "admin_host": config.admin_host,
         }
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
