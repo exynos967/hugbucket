@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
+from importlib.resources import files
 
 from aiohttp import web
 
@@ -15,7 +15,10 @@ from hugbucket.s3.server import S3Handler
 
 logger = logging.getLogger(__name__)
 
-_TPL_DIR = Path(__file__).resolve().parent.parent / "admin"
+# Template loaded via importlib.resources — works in both dev and installed modes.
+_DASHBOARD_HTML = (
+    files("hugbucket.admin").joinpath("dashboard.html").read_text(encoding="utf-8")
+)
 
 
 def create_app(
@@ -105,8 +108,6 @@ def create_app(
 
 
 # ── Route helpers ───────────────────────────────────────────────────────
-
-_DASHBOARD_HTML = (_TPL_DIR / "dashboard.html").read_text(encoding="utf-8")
 
 
 async def _dashboard_handler(_request: web.Request) -> web.Response:
