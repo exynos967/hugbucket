@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from importlib.resources import files
 
@@ -90,6 +91,10 @@ def create_app(
                     logger.warning("  No healthy tokens — namespace not resolved")
             except Exception as exc:
                 logger.error("Failed to resolve HF namespace: %s", exc)
+
+        # Warm pool bucket cache in background so first S3 request is fast
+        if config.pool_bucket_name:
+            asyncio.ensure_future(backend._pool_all_buckets())
 
         logger.info("=" * 60)
         logger.info("  HugBucket: http://%s:%s", config.host, config.port)

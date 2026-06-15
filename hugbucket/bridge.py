@@ -388,18 +388,25 @@ class HFStorageBackend:
         all_buckets = await self._pool_all_buckets()
         all_contents: list[BucketFile] = []
 
-        for b in all_buckets:
+        # Fetch all bucket trees in parallel
+        async def _fetch_one(b: dict) -> list[BucketFile]:
+            result: list[BucketFile] = []
             bucket_id = f"{b['namespace']}/{b['name']}"
             try:
                 files = await self.hub.list_bucket_tree(bucket_id, recursive=True, token=b["token"])
                 for f in files:
                     if f.type != "file":
                         continue
-                    # Prefix key with real bucket name
                     f.path = b["name"] + "/" + f.path
-                    all_contents.append(f)
+                    result.append(f)
             except Exception:
                 logger.warning("Failed to list %s", bucket_id, exc_info=True)
+            return result
+
+        tasks = [_fetch_one(b) for b in all_buckets]
+        results = await asyncio.gather(*tasks)
+        for r in results:
+            all_contents.extend(r)
 
         # Apply S3-style prefix/delimiter filtering
         filtered = [f for f in all_contents if f.path.startswith(prefix)]
