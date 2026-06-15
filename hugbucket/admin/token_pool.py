@@ -177,7 +177,7 @@ class TokenPool:
             return entry.namespace
 
         try:
-            name = await whoami_fn(entry.token)
+            name = await whoami_fn(token=entry.token)
             # Find the entry and update
             for i, t in enumerate(self._config.tokens):
                 if t.token == entry.token:
