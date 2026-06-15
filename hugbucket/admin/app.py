@@ -263,7 +263,6 @@ async def handle_create_bucket(request: web.Request) -> web.Response:
             return _error("所选 Token 尚未解析 namespace", status=400)
         config = request.app["config"]
         config.hf_namespace = entry.namespace
-        bucket_id = f"{entry.namespace}/{name}"
         try:
             bridge.config.hf_namespace = entry.namespace
             url = await bridge.hub.create_bucket(name)
