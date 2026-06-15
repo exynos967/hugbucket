@@ -1,4 +1,4 @@
-"""Top-level entrypoint — starts the S3-compatible gateway."""
+"""Top-level entrypoint — starts the S3 gateway + admin panel."""
 
 from __future__ import annotations
 
