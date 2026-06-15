@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
@@ -29,16 +30,35 @@ class XetConnectionInfo:
 
 @dataclass
 class HubClient:
-    """Async client for HF Hub Bucket API."""
+    """Async client for HF Hub Bucket API.
+
+    Supports dynamic token switching via *token_getter* — a callable that
+    returns the HF token to use for the next request.  This enables
+    round-robin load balancing across multiple tokens without restarting
+    the session.
+
+    When *token_getter* is None, falls back to ``config.hf_token``.
+    """
 
     config: Config
     _session: aiohttp.ClientSession | None = field(default=None, repr=False)
+    _token_getter: Callable[[], str] | None = field(default=None, repr=False)
 
-    def _headers(self) -> dict[str, str]:
-        h = {"User-Agent": "hugbucket/0.1.0"}
-        if self.config.hf_token:
-            h["Authorization"] = f"Bearer {self.config.hf_token}"
-        return h
+    def _get_token(self) -> str:
+        if self._token_getter is not None:
+            token = self._token_getter()
+            if token:
+                return token
+        return self.config.hf_token
+
+    def _base_headers(self) -> dict[str, str]:
+        return {"User-Agent": "hugbucket/0.1.0"}
+
+    def _auth_headers(self) -> dict[str, str]:
+        token = self._get_token()
+        if token:
+            return {"Authorization": f"Bearer {token}"}
+        return {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -46,9 +66,11 @@ class HubClient:
                 limit=self.config.http_pool_size,
                 enable_cleanup_closed=True,
             )
+            # Authorization is passed per-request so token_getter can
+            # return different tokens for each request.
             self._session = aiohttp.ClientSession(
                 connector=connector,
-                headers=self._headers(),
+                headers=self._base_headers(),
                 raise_for_status=False,
             )
         return self._session
@@ -62,11 +84,12 @@ class HubClient:
 
     # ---- Auth / identity ----
 
-    async def whoami(self) -> str:
+    async def whoami(self, *, token: str | None = None) -> str:
         """Get username associated with the HF token via /api/whoami-v2."""
         session = await self._ensure_session()
         url = self._api_url("/api/whoami-v2")
-        async with session.get(url) as resp:
+        headers = {"Authorization": f"Bearer {token}"} if token else self._auth_headers()
+        async with session.get(url, headers=headers) as resp:
             resp.raise_for_status()
             data = await resp.json()
             return data["name"]
@@ -84,18 +107,25 @@ class HubClient:
         if private:
             body["private"] = True
 
-        async with session.post(url, json=body) as resp:
+        async with session.post(url, json=body, headers=self._auth_headers()) as resp:
             if resp.status == 409 and exist_ok:
                 return f"{self.config.hf_endpoint}/buckets/{ns}/{name}"
             resp.raise_for_status()
             data = await resp.json()
             return data.get("url", "")
 
-    async def get_bucket_info(self, bucket_id: str) -> BucketInfo:
+    async def get_bucket_info(
+        self, bucket_id: str, *, token: str | None = None
+    ) -> BucketInfo:
         """Get bucket info. bucket_id = 'namespace/name'."""
         session = await self._ensure_session()
         url = self._api_url(f"/api/buckets/{bucket_id}")
-        async with session.get(url) as resp:
+        headers = (
+            {"Authorization": f"Bearer {token}"}
+            if token
+            else self._auth_headers()
+        )
+        async with session.get(url, headers=headers) as resp:
             resp.raise_for_status()
             d = await resp.json()
             return BucketInfo(
@@ -106,15 +136,22 @@ class HubClient:
                 total_files=d.get("totalFiles", 0),
             )
 
-    async def list_buckets(self, namespace: str | None = None) -> list[BucketInfo]:
+    async def list_buckets(
+        self, namespace: str | None = None, *, token: str | None = None
+    ) -> list[BucketInfo]:
         """List all buckets for the namespace."""
         session = await self._ensure_session()
         ns = namespace or self.config.hf_namespace
         url = self._api_url(f"/api/buckets/{ns}")
         buckets: list[BucketInfo] = []
+        headers = (
+            {"Authorization": f"Bearer {token}"}
+            if token
+            else self._auth_headers()
+        )
 
         while url:
-            async with session.get(url) as resp:
+            async with session.get(url, headers=headers) as resp:
                 resp.raise_for_status()
                 items = await resp.json()
                 for d in items:
@@ -127,7 +164,6 @@ class HubClient:
                             total_files=d.get("totalFiles", 0),
                         )
                     )
-                # Follow pagination via Link header
                 url = self._next_link(resp)
 
         return buckets
@@ -136,7 +172,7 @@ class HubClient:
         """Delete a bucket."""
         session = await self._ensure_session()
         url = self._api_url(f"/api/buckets/{bucket_id}")
-        async with session.delete(url) as resp:
+        async with session.delete(url, headers=self._auth_headers()) as resp:
             if resp.status == 404 and missing_ok:
                 return
             resp.raise_for_status()
@@ -163,7 +199,7 @@ class HubClient:
 
         files: list[BucketFile] = []
         while url:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, headers=self._auth_headers()) as resp:
                 resp.raise_for_status()
                 items = await resp.json()
                 for d in items:
@@ -192,7 +228,9 @@ class HubClient:
 
         for i in range(0, len(paths), PATHS_INFO_BATCH_SIZE):
             batch = paths[i : i + PATHS_INFO_BATCH_SIZE]
-            async with session.post(url, json={"paths": batch}) as resp:
+            async with session.post(
+                url, json={"paths": batch}, headers=self._auth_headers()
+            ) as resp:
                 resp.raise_for_status()
                 items = await resp.json()
                 for d in items:
@@ -263,11 +301,11 @@ class HubClient:
             lines.append(json.dumps({"type": "deleteFile", "path": d}))
 
         body = "\n".join(lines)
-        async with session.post(
-            url,
-            data=body.encode(),
-            headers={"Content-Type": "application/x-ndjson"},
-        ) as resp:
+        req_headers = {
+            "Content-Type": "application/x-ndjson",
+            **self._auth_headers(),
+        }
+        async with session.post(url, data=body.encode(), headers=req_headers) as resp:
             if resp.status >= 400:
                 error_body = await resp.text()
                 logger.error(f"Batch API error {resp.status}: {error_body}")
@@ -288,7 +326,7 @@ class HubClient:
     ) -> XetConnectionInfo:
         session = await self._ensure_session()
         url = self._api_url(f"/api/buckets/{bucket_id}/xet-{token_type}-token")
-        async with session.get(url) as resp:
+        async with session.get(url, headers=self._auth_headers()) as resp:
             resp.raise_for_status()
             return XetConnectionInfo(
                 cas_url=resp.headers["X-Xet-Cas-Url"],
@@ -303,7 +341,7 @@ class HubClient:
         session = await self._ensure_session()
         encoded = quote(path, safe="")
         url = self._api_url(f"/buckets/{bucket_id}/resolve/{encoded}")
-        async with session.head(url, allow_redirects=False) as resp:
+        async with session.head(url, allow_redirects=False, headers=self._auth_headers()) as resp:
             if resp.status == 404:
                 return None
             # Follow relative redirects only
@@ -323,7 +361,7 @@ class HubClient:
         self, session: aiohttp.ClientSession, path: str
     ) -> BucketFile | None:
         url = self._api_url(path)
-        async with session.head(url, allow_redirects=False) as resp:
+        async with session.head(url, allow_redirects=False, headers=self._auth_headers()) as resp:
             if resp.status == 404:
                 return None
             resp.raise_for_status()

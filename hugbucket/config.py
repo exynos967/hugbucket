@@ -13,7 +13,16 @@ class Config:
 
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
+    # Single-token fallback (when token pool is empty, e.g. legacy env-var mode).
     hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
+
+    # Admin / token-pool settings
+    tokens_file: str = field(
+        default_factory=lambda: os.environ.get(
+            "HUGBUCKET_TOKENS_FILE",
+            os.path.join(os.getcwd(), "tokens.json"),
+        )
+    )
 
     # S3 auth — maps to HF token
     s3_access_key: str = field(
@@ -24,7 +33,8 @@ class Config:
     )
 
     # HF namespace (user or org that owns the buckets)
-    # Resolved automatically from HF token via /api/whoami-v2 at startup
+    # Resolved automatically from HF token via /api/whoami-v2 at startup.
+    # When a token pool is active this is set from the first resolved token.
     hf_namespace: str = ""
 
     # Xet CDC settings

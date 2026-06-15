@@ -239,11 +239,17 @@ class _XorbCache:
 
 @dataclass
 class HFStorageBackend:
-    """Orchestrates S3 <-> HF Bucket operations."""
+    """Orchestrates S3 <-> HF Bucket operations.
+
+    When *token_pool* is provided, each outbound HF API request picks
+    the next healthy token (round-robin), spreading load across all
+    configured credentials.
+    """
 
     config: Config
     hub: HubClient = field(init=False)
     cas: CASClient = field(init=False)
+    _token_pool: object | None = field(default=None, repr=False)
     _token_cache: dict[str, XetConnectionInfo] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -256,7 +262,12 @@ class HFStorageBackend:
     )
 
     def __post_init__(self) -> None:
-        self.hub = HubClient(config=self.config)
+        # Wire up token-pool getter if available
+        token_getter = None
+        if self._token_pool is not None:
+            token_getter = self._make_token_getter()
+
+        self.hub = HubClient(config=self.config, _token_getter=token_getter)
         self.cas = CASClient(
             pool_size=self.config.http_pool_size,
             upload_timeout=self.config.cas_upload_timeout,
@@ -265,13 +276,46 @@ class HFStorageBackend:
         )
         self._xorb_cache = _XorbCache(max_bytes=self.config.xorb_cache_max_bytes)
 
+    def _make_token_getter(self):
+        """Return a callable that yields the next token from the pool."""
+        pool = self._token_pool
+
+        def _get() -> str:
+            if pool is None:
+                return self.config.hf_token
+            try:
+                entry = pool.get_next_sync()
+                if entry is not None:
+                    return entry.token
+            except Exception:
+                pass
+            return self.config.hf_token
+
+        return _get
+
     async def close(self) -> None:
         await self.hub.close()
         await self.cas.close()
 
     async def resolve_namespace(self) -> str:
-        """Resolve namespace from the configured HF token."""
-        return await self.hub.whoami()
+        """Resolve namespace: try token pool first, then fall back to config."""
+        if self._token_pool is not None:
+            from hugbucket.admin.token_pool import TokenPool
+
+            pool: TokenPool = self._token_pool
+            await pool.load()
+            if pool.has_tokens:
+                entry = await pool.get_next()
+                if entry is not None:
+                    return await pool.resolve_namespace(entry, self.hub.whoami)
+        # Fallback: single-token mode
+        if self.config.hf_token:
+            return await self.hub.whoami(token=self.config.hf_token)
+        return ""
+
+    @property
+    def token_pool(self):
+        return self._token_pool
 
     def _bucket_id(self, bucket_name: str) -> str:
         """Convert S3 bucket name to HF bucket_id (namespace/name)."""
