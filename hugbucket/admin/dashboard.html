@@ -306,7 +306,19 @@
 
     <!-- ═══ 存储桶 ═══ -->
     <div id="page-buckets" class="page anim-fade-up">
-      <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin-bottom:20px;">存储桶</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px;">
+        <h2 style="font-size:22px;font-weight:700;color:#0f172a;">存储桶</h2>
+        <div style="display:flex;gap:8px;">
+          <button onclick="showBucketModal()" class="btn btn-outline" style="padding:10px 18px;">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="M12 4v16m8-8H4"/></svg>
+            创建桶
+          </button>
+          <button onclick="showBatchModal()" class="btn btn-primary" style="padding:10px 18px;">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+            批量创建
+          </button>
+        </div>
+      </div>
       <div class="card" style="overflow:auto;">
         <table>
           <thead><tr><th>名称</th><th>命名空间</th><th>用量</th><th>文件数</th><th>可见性</th></tr></thead>
@@ -374,6 +386,50 @@
       <div class="modal-actions">
         <button type="submit" class="btn btn-primary">确认添加</button>
         <button type="button" class="btn btn-outline" onclick="hideModal()">取消</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ═══ Bucket Create Modal ═══ -->
+<div id="bucket-modal" class="modal-overlay" onclick="if(event.target===this)hideBucketModal()">
+  <div class="modal-backdrop anim-fade-in"></div>
+  <div class="modal-dialog anim-modal" onclick="event.stopPropagation()" style="max-width:460px;">
+    <div class="modal-header">
+      <h3 class="modal-title" id="bucket-modal-title">创建存储桶</h3>
+      <button class="modal-close" onclick="hideBucketModal()">
+        <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <form class="modal-form" onsubmit="createBucket(event)" id="bucket-form">
+      <div>
+        <label class="field-label">选择 Token <span class="required">*</span></label>
+        <select id="bucket-token" class="input-group" style="padding:13px 14px;border-radius:var(--radius);width:100%;">
+          <option value="">-- 自动（least-in-flight）--</option>
+        </select>
+      </div>
+      <div id="bucket-name-group">
+        <label class="field-label">桶名 <span class="required">*</span></label>
+        <div class="input-group">
+          <span class="prefix"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg></span>
+          <input type="text" id="bucket-name" placeholder="my-bucket">
+        </div>
+      </div>
+      <div id="bucket-count-group" style="display:none;">
+        <label class="field-label">数量 <span class="required">*</span></label>
+        <div class="input-group">
+          <span class="prefix"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg></span>
+          <input type="number" id="bucket-count" value="5" min="1" max="100">
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="bucket-private" style="accent-color:var(--brand);width:17px;height:17px;">
+        <label for="bucket-private" style="font-size:14px;color:var(--text-dim);cursor:pointer;">创建为私有桶</label>
+      </div>
+      <div class="modal-error" id="bucket-modal-error"></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary" id="bucket-submit-btn">确认创建</button>
+        <button type="button" class="btn btn-outline" onclick="hideBucketModal()">取消</button>
       </div>
     </form>
   </div>
@@ -560,6 +616,86 @@ async function addToken(e) {
 
 async function removeToken(i) { if(!confirm('确认删除此 Token？'))return; try{await api('/api/tokens/'+i,{method:'DELETE'});await refreshData();}catch(e){alert(e.message);} }
 async function resolveToken(i) { try{await api('/api/tokens/'+i+'/resolve',{method:'POST'});await refreshData();}catch(e){alert(e.message);} }
+
+// ═══ Bucket Modal ═══
+let bucketBatchMode = false;
+
+function populateTokenSelect() {
+  const sel = $('bucket-token');
+  sel.innerHTML = '<option value="">-- 自动（least-in-flight）--</option>';
+  if (statusData && statusData.token_pool.tokens) {
+    statusData.token_pool.tokens.forEach(t => {
+      if (t.healthy && t.namespace && t.namespace !== '(未解析)') {
+        sel.innerHTML += `<option value="${t.index}">${esc(t.label||'未命名')} · ${esc(t.namespace)}</option>`;
+      }
+    });
+  }
+}
+
+function showBucketModal() {
+  bucketBatchMode = false;
+  populateTokenSelect();
+  $('bucket-modal-title').textContent = '创建存储桶';
+  $('bucket-name-group').style.display = '';
+  $('bucket-count-group').style.display = 'none';
+  $('bucket-submit-btn').textContent = '确认创建';
+  $('bucket-modal').classList.add('show');
+  setTimeout(() => $('bucket-name').focus(), 100);
+}
+
+function showBatchModal() {
+  bucketBatchMode = true;
+  populateTokenSelect();
+  $('bucket-modal-title').textContent = '批量创建存储桶';
+  $('bucket-name-group').style.display = 'none';
+  $('bucket-count-group').style.display = '';
+  $('bucket-submit-btn').textContent = '批量创建';
+  $('bucket-modal').classList.add('show');
+  setTimeout(() => $('bucket-count').focus(), 100);
+}
+
+function hideBucketModal() {
+  $('bucket-modal').classList.remove('show');
+  $('bucket-name').value = '';
+  $('bucket-count').value = '5';
+  $('bucket-private').checked = false;
+  $('bucket-modal-error').style.display = 'none';
+}
+
+async function createBucket(e) {
+  e.preventDefault();
+  const err = $('bucket-modal-error'); err.style.display = 'none';
+  const btn = $('bucket-submit-btn');
+  btn.disabled = true; btn.textContent = '创建中...';
+
+  const tokenIndex = $('bucket-token').value || null;
+  const isPrivate = $('bucket-private').checked;
+
+  try {
+    if (bucketBatchMode) {
+      const count = parseInt($('bucket-count').value) || 5;
+      const r = await api('/api/buckets/batch-create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count, private: isPrivate, token_index: tokenIndex ? parseInt(tokenIndex) : null })
+      });
+      alert(`批量创建完成：${r.count} 个桶\n${r.errors.length ? '失败: ' + r.errors.join(', ') : ''}`);
+    } else {
+      const name = $('bucket-name').value.trim();
+      if (!name) { err.textContent = '请输入桶名'; err.style.display = ''; btn.disabled = false; btn.textContent = '确认创建'; return; }
+      await api('/api/buckets/create', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, private: isPrivate, token_index: tokenIndex ? parseInt(tokenIndex) : null })
+      });
+    }
+    hideBucketModal();
+    await refreshData();
+    navigate('buckets');
+  } catch (ex) {
+    err.textContent = ex.message; err.style.display = '';
+  }
+  btn.disabled = false;
+  btn.textContent = bucketBatchMode ? '批量创建' : '确认创建';
+}
 
 // ═══ Clock ═══
 (function tick(){ $('clock').textContent = new Date().toLocaleString('zh-CN',{hour12:false}); setTimeout(tick,1000); })();

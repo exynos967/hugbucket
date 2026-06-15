@@ -227,6 +227,122 @@ async def handle_bucket_detail(request: web.Request) -> web.Response:
     )
 
 
+# -- bucket creation handlers -----------------------------------------------
+
+
+async def handle_create_bucket(request: web.Request) -> web.Response:
+    """POST /api/buckets/create — create a bucket under a specific token."""
+    bridge = request.app["bridge"]
+    pool = request.app["token_pool"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("请求体不是合法的 JSON")
+
+    name = (body.get("name") or "").strip()
+    private = bool(body.get("private", False))
+    token_index = body.get("token_index")
+
+    if not name:
+        return _error("桶名不能为空")
+
+    # Use specific token if specified, otherwise pool acquire
+    await pool.load()
+    if token_index is not None:
+        try:
+            token_index = int(token_index)
+        except ValueError:
+            return _error("无效的 token_index")
+        if token_index < 0 or token_index >= len(pool._config.tokens):
+            return _error("Token 索引不存在", status=404)
+        entry = pool._config.tokens[token_index]
+        if not entry.healthy:
+            return _error("所选 Token 不健康", status=400)
+        if not entry.namespace:
+            return _error("所选 Token 尚未解析 namespace", status=400)
+        config = request.app["config"]
+        config.hf_namespace = entry.namespace
+        bucket_id = f"{entry.namespace}/{name}"
+        try:
+            bridge.config.hf_namespace = entry.namespace
+            url = await bridge.hub.create_bucket(name)
+            bridge._bucket_ns_cache[name] = entry.namespace
+            return _json({"ok": True, "url": url, "namespace": entry.namespace}, status=201)
+        except Exception as e:
+            return _error(f"创建桶失败: {e}", status=502)
+    else:
+        if not pool.has_tokens:
+            return _error("没有可用的 Token — 请先在 Token 管理页面添加", status=503)
+        url = await bridge.create_bucket(name, private=private)
+        return _json({"ok": True, "url": url}, status=201)
+
+
+async def handle_batch_create_buckets(request: web.Request) -> web.Response:
+    """POST /api/buckets/batch-create — create N buckets with random 8-char names."""
+    import secrets
+    import string
+
+    bridge = request.app["bridge"]
+    pool = request.app["token_pool"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("请求体不是合法的 JSON")
+
+    count = body.get("count", 1)
+    private = bool(body.get("private", False))
+    token_index = body.get("token_index")
+
+    try:
+        count = int(count)
+    except (ValueError, TypeError):
+        return _error("count 必须是整数")
+    if count < 1 or count > 100:
+        return _error("count 范围: 1-100")
+
+    # Resolve token
+    await pool.load()
+    if token_index is not None:
+        try:
+            token_index = int(token_index)
+        except ValueError:
+            return _error("无效的 token_index")
+        if token_index < 0 or token_index >= len(pool._config.tokens):
+            return _error("Token 索引不存在", status=404)
+        entry = pool._config.tokens[token_index]
+    else:
+        entry = await pool.acquire()
+        if entry is None:
+            return _error("没有可用的 Token", status=503)
+
+    if not entry.healthy:
+        return _error("所选 Token 不健康", status=400)
+    if not entry.namespace:
+        return _error("所选 Token 尚未解析 namespace", status=400)
+
+    config = request.app["config"]
+    config.hf_namespace = entry.namespace
+    alphabet = string.ascii_lowercase + string.digits
+    created: list[str] = []
+    errors: list[str] = []
+
+    for _ in range(count):
+        random_name = "".join(secrets.choice(alphabet) for _ in range(8))
+        try:
+            await bridge.hub.create_bucket(random_name, private=private, exist_ok=True)
+            bridge._bucket_ns_cache[random_name] = entry.namespace
+            created.append(random_name)
+        except Exception as e:
+            errors.append(f"{random_name}: {e}")
+
+    if token_index is None:
+        await pool.release(entry.token)
+
+    return _json({"ok": True, "created": created, "errors": errors, "count": len(created)})
+
+
 def _mask(token: str) -> str:
     if len(token) <= 8:
         return token[:2] + "****"
