@@ -339,11 +339,32 @@ async def handle_ensure_buckets(request: web.Request) -> web.Response:
 async def handle_delete_bucket(request: web.Request) -> web.Response:
     """DELETE /api/buckets/{namespace}/{name} — delete a bucket."""
     bridge = request.app["bridge"]
+    pool = request.app["token_pool"]
     namespace = request.match_info["namespace"]
     name = request.match_info["name"]
 
+    # Find the right token for this namespace
+    token = None
+    entry = await pool.get_token_for_namespace(namespace)
+    if entry:
+        token = entry.token
+
     try:
-        await bridge.hub.delete_bucket(f"{namespace}/{name}")
+        if token:
+            # Use explicit token to ensure authorization
+            session = await bridge.hub._ensure_session()
+            url = bridge.hub._api_url(f"/api/buckets/{namespace}/{name}")
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "hugbucket/0.1.0",
+            }
+            async with session.delete(url, headers=headers) as resp:
+                if resp.status == 404:
+                    pass  # already gone — ok
+                else:
+                    resp.raise_for_status()
+        else:
+            await bridge.hub.delete_bucket(f"{namespace}/{name}")
         bridge._bucket_ns_cache.pop(name, None)
         return _json({"ok": True})
     except Exception as e:
