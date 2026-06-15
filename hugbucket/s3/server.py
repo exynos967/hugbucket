@@ -229,14 +229,18 @@ class S3Handler:
 
     async def handle_list_buckets(self, request: web.Request) -> web.Response:
         try:
-            buckets = await self.bridge.list_buckets()
-            bucket_dicts = [
-                {
-                    "name": b.id.split("/")[-1] if "/" in b.id else b.id,
-                    "creation_date": b.created_at,
-                }
-                for b in buckets
-            ]
+            config = request.app["config"]
+            if config.pool_bucket_name:
+                bucket_dicts = [{"name": config.pool_bucket_name, "creation_date": ""}]
+            else:
+                buckets = await self.bridge.list_buckets()
+                bucket_dicts = [
+                    {
+                        "name": b.id.split("/")[-1] if "/" in b.id else b.id,
+                        "creation_date": b.created_at,
+                    }
+                    for b in buckets
+                ]
             body = list_buckets_xml(bucket_dicts)
             return web.Response(status=200, content_type=XML_CONTENT, body=body)
         except Exception as e:
@@ -267,6 +271,8 @@ class S3Handler:
         self, request: web.Request, bucket: str
     ) -> web.Response:
         try:
+            if self._is_pool_bucket(request, bucket):
+                return web.Response(status=200)
             info = await self.bridge.head_bucket(bucket)
             if info is None:
                 return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
@@ -350,6 +356,10 @@ class S3Handler:
 
     # ---- Object listing ----
 
+    def _is_pool_bucket(self, request: web.Request, bucket: str) -> bool:
+        config = request.app["config"]
+        return bool(config.pool_bucket_name and bucket == config.pool_bucket_name)
+
     async def handle_list_objects_v2(
         self, request: web.Request, bucket: str
     ) -> web.Response:
@@ -359,7 +369,13 @@ class S3Handler:
             max_keys = int(request.query.get("max-keys", "1000"))
             continuation = request.query.get("continuation-token", "")
 
-            result = await self.bridge.list_objects(
+            if self._is_pool_bucket(request, bucket):
+                result = await self.bridge.pool_list_objects(
+                    prefix=prefix, delimiter=delimiter,
+                    max_keys=max_keys, continuation_token=continuation,
+                )
+            else:
+                result = await self.bridge.list_objects(
                 bucket,
                 prefix=prefix,
                 delimiter=delimiter,
@@ -407,7 +423,10 @@ class S3Handler:
     ) -> web.Response:
         try:
             data = await request.read()
-            result = await self.bridge.put_object(bucket, key, data)
+            if self._is_pool_bucket(request, bucket):
+                result = await self.bridge.pool_put_object(key, data)
+            else:
+                result = await self.bridge.put_object(bucket, key, data)
             return web.Response(
                 status=200,
                 headers={
@@ -479,7 +498,10 @@ class S3Handler:
     ) -> web.Response | web.StreamResponse:
         try:
             # Get metadata first for headers and 404 check
-            file_info = await self.bridge.head_object(bucket, key)
+            if self._is_pool_bucket(request, bucket):
+                file_info = await self.bridge.pool_head_object(key)
+            else:
+                file_info = await self.bridge.head_object(bucket, key)
             if file_info is None:
                 return _s3_error(
                     404,
@@ -523,9 +545,14 @@ class S3Handler:
 
             # Get the stream — bridge skips irrelevant xorbs when
             # byte_range is set and trims to the exact byte window.
-            stream = await self.bridge.get_object_stream(
-                bucket, key, file_info=file_info, byte_range=byte_range
-            )
+            if self._is_pool_bucket(request, bucket):
+                stream = await self.bridge.pool_get_object_stream(
+                    key, file_info=file_info, byte_range=byte_range
+                )
+            else:
+                stream = await self.bridge.get_object_stream(
+                    bucket, key, file_info=file_info, byte_range=byte_range
+                )
             if stream is None:
                 return _s3_error(
                     404,
@@ -583,7 +610,10 @@ class S3Handler:
         self, request: web.Request, bucket: str, key: str
     ) -> web.Response:
         try:
-            await self.bridge.delete_object(bucket, key)
+            if self._is_pool_bucket(request, bucket):
+                await self.bridge.pool_delete_object(key)
+            else:
+                await self.bridge.delete_object(bucket, key)
             return web.Response(status=204)
         except aiohttp.ClientResponseError as e:
             if e.status == 404:
@@ -599,7 +629,10 @@ class S3Handler:
         self, request: web.Request, bucket: str, key: str
     ) -> web.Response:
         try:
-            file_info = await self.bridge.head_object(bucket, key)
+            if self._is_pool_bucket(request, bucket):
+                file_info = await self.bridge.pool_head_object(key)
+            else:
+                file_info = await self.bridge.head_object(bucket, key)
             if file_info is None:
                 # Directory HEAD: S3 clients (e.g. S3 Browser) send HEAD on
                 # folder keys (trailing slash) to check if a folder exists.

@@ -14,6 +14,12 @@ class Config:
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
 
+    # Virtual pool bucket: when set, all S3 operations go through this single
+    # bucket name, transparently routing to the underlying HF buckets.
+    pool_bucket_name: str = field(
+        default_factory=lambda: os.environ.get("POOL_BUCKET_NAME", "")
+    )
+
     # Admin panel password (required)
     admin_password: str = field(
         default_factory=lambda: os.environ.get("ADMIN_PASSWORD", "")

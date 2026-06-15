@@ -337,6 +337,175 @@ class HFStorageBackend:
     def token_pool(self):
         return self._token_pool
 
+    # ---- Virtual pool bucket (single-bucket mode) ---------------------------
+
+    # key → real_bucket_name cache for the virtual pool bucket
+    _pool_file_cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    async def _pool_all_buckets(self) -> list[dict]:
+        """Return [(name, namespace, token), ...] for all real buckets."""
+        result: list[dict] = []
+        if self._token_pool is None:
+            return result
+        pool = self._token_pool
+        await pool.load()
+        for ns in pool.all_namespaces:
+            entry = await pool.get_token_for_namespace(ns)
+            if entry is None:
+                continue
+            try:
+                buckets = await self.hub.list_buckets(ns, token=entry.token)
+                for b in buckets:
+                    name = b.id.split("/")[-1] if "/" in b.id else b.id
+                    self._bucket_ns_cache[name] = ns
+                    result.append({"name": name, "namespace": ns, "token": entry.token})
+            except Exception:
+                logger.warning("Failed to list buckets for ns %s", ns, exc_info=True)
+        return result
+
+    async def pool_list_objects(self, prefix: str = "", delimiter: str = "",
+                                 max_keys: int = 1000,
+                                 continuation_token: str = "") -> dict:
+        """Aggregate objects from all real buckets, keyed by bucket name."""
+        all_buckets = await self._pool_all_buckets()
+        all_contents: list[BucketFile] = []
+
+        for b in all_buckets:
+            bucket_id = f"{b['namespace']}/{b['name']}"
+            try:
+                files = await self.hub.list_bucket_tree(bucket_id, recursive=True)
+                for f in files:
+                    if f.type != "file":
+                        continue
+                    # Prefix key with real bucket name
+                    f.path = b["name"] + "/" + f.path
+                    all_contents.append(f)
+            except Exception:
+                logger.warning("Failed to list %s", bucket_id, exc_info=True)
+
+        # Apply S3-style prefix/delimiter filtering
+        filtered = [f for f in all_contents if f.path.startswith(prefix)]
+        contents: list[BucketFile] = []
+        common_prefixes: set[str] = set()
+
+        if delimiter:
+            for f in filtered:
+                rest = f.path[len(prefix):]
+                delim_pos = rest.find(delimiter)
+                if delim_pos >= 0:
+                    common_prefixes.add(prefix + rest[:delim_pos + len(delimiter)])
+                else:
+                    contents.append(f)
+        else:
+            contents = [f for f in filtered]
+
+        contents.sort(key=lambda f: f.path)
+        sorted_prefixes = sorted(common_prefixes)
+
+        # Pagination
+        start_idx = 0
+        if continuation_token:
+            for i, c in enumerate(contents):
+                if c.path > continuation_token:
+                    start_idx = i
+                    break
+
+        truncated = len(contents) > start_idx + max_keys
+        page = contents[start_idx:start_idx + max_keys]
+        next_token = page[-1].path if truncated and page else None
+
+        return {
+            "contents": page,
+            "common_prefixes": sorted_prefixes,
+            "is_truncated": truncated,
+            "next_continuation_token": next_token,
+        }
+
+    async def pool_put_object(self, key: str, data: bytes) -> dict:
+        """Write to the least-in-flight real bucket, recording mapping."""
+        all_buckets = await self._pool_all_buckets()
+        if not all_buckets:
+            raise RuntimeError("No buckets available in pool")
+
+        # Pick least-in-flight — acquire a token
+        if self._token_pool is not None:
+            entry = await self._token_pool.acquire()
+            if entry is None:
+                raise RuntimeError("No healthy token available")
+            try:
+                ns = entry.namespace or await self._token_pool.resolve_namespace(entry, self.hub.whoami)
+                # Find or create a bucket for this token
+                my_buckets = [b for b in all_buckets if b["namespace"] == ns]
+                if my_buckets:
+                    real_bucket = my_buckets[0]["name"]
+                else:
+                    import secrets, string
+                    real_bucket = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+                    self.config.hf_namespace = ns
+                    await self.hub.create_bucket(real_bucket)
+                    self._bucket_ns_cache[real_bucket] = ns
+
+                self.config.hf_namespace = ns
+                self._pool_file_cache[key] = real_bucket
+                return await self.put_object(real_bucket, key, data)
+            finally:
+                await self._token_pool.release(entry.token)
+
+        # Fallback without pool
+        first = all_buckets[0]
+        self._pool_file_cache[key] = first["name"]
+        self.config.hf_namespace = first["namespace"]
+        return await self.put_object(first["name"], key, data)
+
+    async def _pool_find_bucket(self, key: str) -> str | None:
+        """Find which real bucket contains *key*. Returns bucket name or None."""
+        if key in self._pool_file_cache:
+            return self._pool_file_cache[key]
+
+        all_buckets = await self._pool_all_buckets()
+        for b in all_buckets:
+            bucket_id = f"{b['namespace']}/{b['name']}"
+            try:
+                info = await self.hub.get_paths_info(bucket_id, [key])
+                if info and info[0].type == "file":
+                    self._pool_file_cache[key] = b["name"]
+                    return b["name"]
+            except Exception:
+                continue
+        return None
+
+    async def pool_get_object(self, key: str) -> bytes | None:
+        """Get object from pool — probes real buckets until found."""
+        bucket_name = await self._pool_find_bucket(key)
+        if not bucket_name:
+            return None
+        return await self.get_object(bucket_name, key)
+
+    async def pool_get_object_stream(self, key: str, file_info=None,
+                                      byte_range=None):
+        """Stream object from pool."""
+        bucket_name = await self._pool_find_bucket(key)
+        if not bucket_name:
+            return None
+        return await self.get_object_stream(bucket_name, key, file_info=file_info, byte_range=byte_range)
+
+    async def pool_head_object(self, key: str) -> BucketFile | None:
+        """Head object in pool."""
+        bucket_name = await self._pool_find_bucket(key)
+        if not bucket_name:
+            return None
+        return await self.head_object(bucket_name, key)
+
+    async def pool_delete_object(self, key: str) -> None:
+        """Delete object from pool."""
+        bucket_name = await self._pool_find_bucket(key)
+        if bucket_name is None:
+            bucket_name = self._pool_file_cache.get(key)
+        if not bucket_name:
+            raise FileNotFoundError(key)
+        await self.delete_object(bucket_name, key)
+        self._pool_file_cache.pop(key, None)
+
     # ---- Unified bucket pool (all namespaces merged) ------------------------
 
     # bucket_name → namespace cache (populated by list_buckets, lazy fallback)
