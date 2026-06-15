@@ -125,7 +125,7 @@ def _register_admin_routes(app: web.Application) -> None:
         handle_list_buckets,
         handle_bucket_detail,
         handle_create_bucket,
-        handle_batch_create_buckets,
+        handle_ensure_buckets,
         handle_login,
         handle_logout,
     )
@@ -143,4 +143,4 @@ def _register_admin_routes(app: web.Application) -> None:
     app.router.add_get("/api/buckets", handle_list_buckets)
     app.router.add_get("/api/buckets/{namespace}/{name}", handle_bucket_detail)
     app.router.add_post("/api/buckets/create", handle_create_bucket)
-    app.router.add_post("/api/buckets/batch-create", handle_batch_create_buckets)
+    app.router.add_post("/api/buckets/ensure", handle_ensure_buckets)

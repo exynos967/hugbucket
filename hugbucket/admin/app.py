@@ -277,8 +277,12 @@ async def handle_create_bucket(request: web.Request) -> web.Response:
         return _json({"ok": True, "url": url}, status=201)
 
 
-async def handle_batch_create_buckets(request: web.Request) -> web.Response:
-    """POST /api/buckets/batch-create — create N buckets with random 8-char names."""
+async def handle_ensure_buckets(request: web.Request) -> web.Response:
+    """POST /api/buckets/ensure — 确保每个 Token 的 namespace 下至少有一个桶。
+
+    遍历所有健康 Token，检查其 namespace 是否已有桶。
+    没有桶的 namespace → 创建一个随机 8 位桶名。
+    """
     import secrets
     import string
 
@@ -290,56 +294,43 @@ async def handle_batch_create_buckets(request: web.Request) -> web.Response:
     except Exception:
         return _error("请求体不是合法的 JSON")
 
-    count = body.get("count", 1)
     private = bool(body.get("private", False))
-    token_index = body.get("token_index")
-
-    try:
-        count = int(count)
-    except (ValueError, TypeError):
-        return _error("count 必须是整数")
-    if count < 1 or count > 100:
-        return _error("count 范围: 1-100")
-
-    # Resolve token
     await pool.load()
-    if token_index is not None:
-        try:
-            token_index = int(token_index)
-        except ValueError:
-            return _error("无效的 token_index")
-        if token_index < 0 or token_index >= len(pool._config.tokens):
-            return _error("Token 索引不存在", status=404)
-        entry = pool._config.tokens[token_index]
-    else:
-        entry = await pool.acquire()
-        if entry is None:
-            return _error("没有可用的 Token", status=503)
 
-    if not entry.healthy:
-        return _error("所选 Token 不健康", status=400)
-    if not entry.namespace:
-        return _error("所选 Token 尚未解析 namespace", status=400)
+    if not pool.has_tokens:
+        return _error("没有可用的 Token", status=503)
 
-    config = request.app["config"]
-    config.hf_namespace = entry.namespace
     alphabet = string.ascii_lowercase + string.digits
-    created: list[str] = []
-    errors: list[str] = []
+    result: list[dict] = []
 
-    for _ in range(count):
+    for entry in pool._config.tokens:
+        if not entry.healthy or not entry.namespace:
+            continue
+
+        # Check if this namespace already has buckets
+        try:
+            existing = await bridge.hub.list_buckets(entry.namespace, token=entry.token)
+        except Exception:
+            result.append({"namespace": entry.namespace, "label": entry.label, "status": "error", "reason": "list failed"})
+            continue
+
+        if existing:
+            result.append({"namespace": entry.namespace, "label": entry.label, "status": "skipped", "existing_buckets": len(existing)})
+            continue
+
+        # No buckets — create one
         random_name = "".join(secrets.choice(alphabet) for _ in range(8))
         try:
-            await bridge.hub.create_bucket(random_name, private=private, exist_ok=True)
+            bridge.config.hf_namespace = entry.namespace
+            await bridge.hub.create_bucket(random_name, private=private)
             bridge._bucket_ns_cache[random_name] = entry.namespace
-            created.append(random_name)
+            result.append({"namespace": entry.namespace, "label": entry.label, "status": "created", "bucket": random_name})
         except Exception as e:
-            errors.append(f"{random_name}: {e}")
+            result.append({"namespace": entry.namespace, "label": entry.label, "status": "error", "reason": str(e)})
 
-    if token_index is None:
-        await pool.release(entry.token)
-
-    return _json({"ok": True, "created": created, "errors": errors, "count": len(created)})
+    created = sum(1 for r in result if r["status"] == "created")
+    skipped = sum(1 for r in result if r["status"] == "skipped")
+    return _json({"ok": True, "created": created, "skipped": skipped, "details": result})
 
 
 def _mask(token: str) -> str:

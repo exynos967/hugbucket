@@ -313,9 +313,9 @@
             <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.3" d="M12 4v16m8-8H4"/></svg>
             创建桶
           </button>
-          <button onclick="showBatchModal()" class="btn btn-primary" style="padding:10px 18px;">
-            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-            批量创建
+          <button onclick="ensureBuckets()" class="btn btn-primary" style="padding:10px 18px;">
+            <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            一键确保
           </button>
         </div>
       </div>
@@ -408,18 +408,11 @@
           <option value="">-- 自动（least-in-flight）--</option>
         </select>
       </div>
-      <div id="bucket-name-group">
+      <div>
         <label class="field-label">桶名 <span class="required">*</span></label>
         <div class="input-group">
           <span class="prefix"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg></span>
           <input type="text" id="bucket-name" placeholder="my-bucket">
-        </div>
-      </div>
-      <div id="bucket-count-group" style="display:none;">
-        <label class="field-label">数量 <span class="required">*</span></label>
-        <div class="input-group">
-          <span class="prefix"><svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg></span>
-          <input type="number" id="bucket-count" value="5" min="1" max="100">
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
@@ -618,8 +611,6 @@ async function removeToken(i) { if(!confirm('确认删除此 Token？'))return; 
 async function resolveToken(i) { try{await api('/api/tokens/'+i+'/resolve',{method:'POST'});await refreshData();}catch(e){alert(e.message);} }
 
 // ═══ Bucket Modal ═══
-let bucketBatchMode = false;
-
 function populateTokenSelect() {
   const sel = $('bucket-token');
   sel.innerHTML = '<option value="">-- 自动（least-in-flight）--</option>';
@@ -633,31 +624,14 @@ function populateTokenSelect() {
 }
 
 function showBucketModal() {
-  bucketBatchMode = false;
   populateTokenSelect();
-  $('bucket-modal-title').textContent = '创建存储桶';
-  $('bucket-name-group').style.display = '';
-  $('bucket-count-group').style.display = 'none';
-  $('bucket-submit-btn').textContent = '确认创建';
   $('bucket-modal').classList.add('show');
   setTimeout(() => $('bucket-name').focus(), 100);
-}
-
-function showBatchModal() {
-  bucketBatchMode = true;
-  populateTokenSelect();
-  $('bucket-modal-title').textContent = '批量创建存储桶';
-  $('bucket-name-group').style.display = 'none';
-  $('bucket-count-group').style.display = '';
-  $('bucket-submit-btn').textContent = '批量创建';
-  $('bucket-modal').classList.add('show');
-  setTimeout(() => $('bucket-count').focus(), 100);
 }
 
 function hideBucketModal() {
   $('bucket-modal').classList.remove('show');
   $('bucket-name').value = '';
-  $('bucket-count').value = '5';
   $('bucket-private').checked = false;
   $('bucket-modal-error').style.display = 'none';
 }
@@ -670,31 +644,41 @@ async function createBucket(e) {
 
   const tokenIndex = $('bucket-token').value || null;
   const isPrivate = $('bucket-private').checked;
+  const name = $('bucket-name').value.trim();
+
+  if (!name) { err.textContent = '请输入桶名'; err.style.display = ''; btn.disabled = false; btn.textContent = '确认创建'; return; }
 
   try {
-    if (bucketBatchMode) {
-      const count = parseInt($('bucket-count').value) || 5;
-      const r = await api('/api/buckets/batch-create', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count, private: isPrivate, token_index: tokenIndex ? parseInt(tokenIndex) : null })
-      });
-      alert(`批量创建完成：${r.count} 个桶\n${r.errors.length ? '失败: ' + r.errors.join(', ') : ''}`);
-    } else {
-      const name = $('bucket-name').value.trim();
-      if (!name) { err.textContent = '请输入桶名'; err.style.display = ''; btn.disabled = false; btn.textContent = '确认创建'; return; }
-      await api('/api/buckets/create', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, private: isPrivate, token_index: tokenIndex ? parseInt(tokenIndex) : null })
-      });
-    }
+    await api('/api/buckets/create', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, private: isPrivate, token_index: tokenIndex ? parseInt(tokenIndex) : null })
+    });
     hideBucketModal();
     await refreshData();
     navigate('buckets');
   } catch (ex) {
     err.textContent = ex.message; err.style.display = '';
   }
-  btn.disabled = false;
-  btn.textContent = bucketBatchMode ? '批量创建' : '确认创建';
+  btn.disabled = false; btn.textContent = '确认创建';
+}
+
+async function ensureBuckets() {
+  if (!confirm('将为每个没有桶的 Token 创建一个随机桶，确认？')) return;
+  try {
+    const r = await api('/api/buckets/ensure', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ private: false })
+    });
+    const lines = r.details.map(d => {
+      const icon = d.status === 'created' ? '✅' : d.status === 'skipped' ? '⏭️' : '❌';
+      return `${icon} ${d.namespace} (${d.label||'-'}): ${d.status === 'created' ? '创建 ' + d.bucket : d.status === 'skipped' ? '已有 ' + d.existing_buckets + ' 个桶' : d.reason}`;
+    });
+    alert(`一键确保完成：创建 ${r.created} 个，跳过 ${r.skipped} 个\n\n${lines.join('\n')}`);
+    await refreshData();
+    navigate('buckets');
+  } catch (ex) {
+    alert('操作失败: ' + ex.message);
+  }
 }
 
 // ═══ Clock ═══
