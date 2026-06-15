@@ -281,15 +281,13 @@ class HFStorageBackend:
         pool = self._token_pool
 
         def _get() -> str:
-            if pool is None:
-                return self.config.hf_token
             try:
                 entry = pool.get_next_sync()
                 if entry is not None:
                     return entry.token
             except Exception:
                 pass
-            return self.config.hf_token
+            return ""
 
         return _get
 
@@ -298,7 +296,7 @@ class HFStorageBackend:
         await self.cas.close()
 
     async def resolve_namespace(self) -> str:
-        """Resolve namespace: try token pool first, then fall back to config."""
+        """Resolve namespace from the token pool."""
         if self._token_pool is not None:
             from hugbucket.admin.token_pool import TokenPool
 
@@ -308,9 +306,6 @@ class HFStorageBackend:
                 entry = await pool.get_next()
                 if entry is not None:
                     return await pool.resolve_namespace(entry, self.hub.whoami)
-        # Fallback: single-token mode
-        if self.config.hf_token:
-            return await self.hub.whoami(token=self.config.hf_token)
         return ""
 
     @property

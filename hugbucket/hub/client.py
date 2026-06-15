@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import quote
@@ -37,7 +36,7 @@ class HubClient:
     round-robin load balancing across multiple tokens without restarting
     the session.
 
-    When *token_getter* is None, falls back to ``config.hf_token``.
+    When *token_getter* is None, no Authorization header is sent.
     """
 
     config: Config
@@ -49,7 +48,7 @@ class HubClient:
             token = self._token_getter()
             if token:
                 return token
-        return self.config.hf_token
+        return ""
 
     def _base_headers(self) -> dict[str, str]:
         return {"User-Agent": "hugbucket/0.1.0"}

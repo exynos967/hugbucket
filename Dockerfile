@@ -15,6 +15,7 @@ RUN uv sync --no-dev
 # Ensure writable data directory for tokens.json
 RUN mkdir -p /data
 ENV HUGBUCKET_TOKENS_FILE=/data/tokens.json
+ENV ADMIN_PASSWORD=changeme
 
 EXPOSE 9000
 

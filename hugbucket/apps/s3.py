@@ -58,7 +58,7 @@ def main() -> None:
     )
 
     # -- Validate ---------------------------------------------------------
-    if not config.hf_token and not store.exists():
+    if not store.exists():
         logger.warning("=" * 60)
         logger.warning("  No HF_TOKEN env var and no tokens.json found.")
         logger.warning("  The gateway will start, but you must configure")

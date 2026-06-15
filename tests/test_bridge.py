@@ -13,7 +13,7 @@ from hugbucket.hub.client import BucketFile
 
 @pytest.fixture
 def config() -> Config:
-    return Config(hf_token="fake-token", hf_namespace="testns")
+    return Config(hf_namespace="testns")
 
 
 @pytest.fixture

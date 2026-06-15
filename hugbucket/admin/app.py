@@ -1,4 +1,4 @@
-"""Admin API handlers — token management + bucket usage dashboard."""
+"""Admin API handlers — auth, token management, bucket usage dashboard."""
 
 from __future__ import annotations
 
@@ -6,6 +6,8 @@ import json
 import logging
 
 from aiohttp import web
+
+from hugbucket.admin.auth import create_session_cookie, logout_cookie
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,36 @@ def _json(data, status: int = 200) -> web.Response:
 
 def _error(message: str, status: int = 400) -> web.Response:
     return _json({"error": message}, status=status)
+
+
+# -- auth handlers ---------------------------------------------------------
+
+
+async def handle_login(request: web.Request) -> web.Response:
+    """POST /api/auth/login — validate password, set session cookie."""
+    config = request.app["config"]
+    password = config.admin_password
+
+    if not password:
+        return _error("管理员密码未配置", status=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("请求体不是合法的 JSON")
+
+    provided = (body.get("password") or "").strip()
+
+    if provided != password:
+        return _error("密码错误", status=401)
+
+    _, cookie = create_session_cookie(password)
+    return web.json_response({"ok": True}, headers={"Set-Cookie": cookie})
+
+
+async def handle_logout(request: web.Request) -> web.Response:
+    """POST /api/auth/logout — clear session cookie."""
+    return web.json_response({"ok": True}, headers={"Set-Cookie": logout_cookie()})
 
 
 # -- handlers ----------------------------------------------------------------
@@ -145,54 +177,30 @@ async def handle_list_buckets(request: web.Request) -> web.Response:
     """GET /api/buckets — list all buckets across all namespaces."""
     bridge = request.app["bridge"]
     pool = request.app["token_pool"]
-    config = request.app["config"]
 
     all_buckets: list[dict] = []
-
-    # Collect across all healthy token namespaces
     namespaces = pool.all_namespaces
 
-    if not namespaces:
-        # No token pool configured — try single-token mode
-        if config.hf_token:
-            try:
-                ns = config.hf_namespace or await bridge.hub.whoami(token=config.hf_token)
-                buckets = await bridge.hub.list_buckets(ns, token=config.hf_token)
-                for b in buckets:
-                    all_buckets.append(
-                        {
-                            "id": b.id,
-                            "name": b.id.split("/")[-1] if "/" in b.id else b.id,
-                            "namespace": ns,
-                            "private": b.private,
-                            "created_at": b.created_at,
-                            "size": b.size,
-                            "total_files": b.total_files,
-                        }
-                    )
-            except Exception as e:
-                logger.warning("Failed to list buckets for single token: %s", e)
-    else:
-        for ns in namespaces:
-            try:
-                entry = await pool.get_token_for_namespace(ns)
-                if entry is None:
-                    continue
-                buckets = await bridge.hub.list_buckets(ns, token=entry.token)
-                for b in buckets:
-                    all_buckets.append(
-                        {
-                            "id": b.id,
-                            "name": b.id.split("/")[-1] if "/" in b.id else b.id,
-                            "namespace": ns,
-                            "private": b.private,
-                            "created_at": b.created_at,
-                            "size": b.size,
-                            "total_files": b.total_files,
-                        }
-                    )
-            except Exception as e:
-                logger.warning("Failed to list buckets for namespace %s: %s", ns, e)
+    for ns in namespaces:
+        try:
+            entry = await pool.get_token_for_namespace(ns)
+            if entry is None:
+                continue
+            buckets = await bridge.hub.list_buckets(ns, token=entry.token)
+            for b in buckets:
+                all_buckets.append(
+                    {
+                        "id": b.id,
+                        "name": b.id.split("/")[-1] if "/" in b.id else b.id,
+                        "namespace": ns,
+                        "private": b.private,
+                        "created_at": b.created_at,
+                        "size": b.size,
+                        "total_files": b.total_files,
+                    }
+                )
+        except Exception as e:
+            logger.warning("Failed to list buckets for namespace %s: %s", ns, e)
 
     # Sort by size descending
     all_buckets.sort(key=lambda b: b["size"], reverse=True)

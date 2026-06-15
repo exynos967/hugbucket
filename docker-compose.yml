@@ -6,10 +6,9 @@ services:
     ports:
       - "9000:9000"   # S3 gateway + Admin panel (same port)
     environment:
+      - ADMIN_PASSWORD=changeme
       - AWS_ACCESS_KEY_ID=hugbucket
       - AWS_SECRET_ACCESS_KEY=hugbucket
-      # 可选：单 Token 回退模式
-      # - HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxx
       - HUGBUCKET_TOKENS_FILE=/data/tokens.json
     volumes:
       - hugbucket_data:/data

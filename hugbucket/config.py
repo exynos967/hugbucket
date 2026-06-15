@@ -13,8 +13,11 @@ class Config:
 
     # HF Hub settings
     hf_endpoint: str = "https://huggingface.co"
-    # Single-token fallback (when token pool is empty, e.g. legacy env-var mode).
-    hf_token: str = field(default_factory=lambda: os.environ.get("HF_TOKEN", ""))
+
+    # Admin panel password (required)
+    admin_password: str = field(
+        default_factory=lambda: os.environ.get("ADMIN_PASSWORD", "")
+    )
 
     # Admin / token-pool settings
     tokens_file: str = field(

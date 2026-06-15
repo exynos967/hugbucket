@@ -15,7 +15,6 @@ from hugbucket.s3.server import S3Handler
 
 logger = logging.getLogger(__name__)
 
-# Template loaded via importlib.resources — works in both dev and installed modes.
 _DASHBOARD_HTML = (
     files("hugbucket.admin").joinpath("dashboard.html").read_text(encoding="utf-8")
 )
@@ -34,30 +33,33 @@ def create_app(
         backend,
         multipart_upload_ttl=config.multipart_upload_ttl,
     )
+
+    # Middlewares: admin auth runs BEFORE S3 auth so admin routes are
+    # protected by login password rather than AWS SigV4.
+    middlewares = []
+    if config.admin_password:
+        from hugbucket.admin.auth import admin_auth_middleware
+        middlewares.append(admin_auth_middleware(config.admin_password))
+    middlewares.append(s3_auth_middleware)
+
     app = web.Application(
         client_max_size=max_upload_bytes,
-        middlewares=[s3_auth_middleware],
+        middlewares=middlewares,
     )
     app["config"] = config
     app["bridge"] = backend
     if token_pool is not None:
         app["token_pool"] = token_pool
 
-    # ── Route registration (order = priority) ───────────────────────────
-    # 1. Admin API routes (explicit paths, highest priority)
+    # ── Routes (order = priority) ────────────────────────────────────────
     _register_admin_routes(app)
-
-    # 2. Admin dashboard at /admin
     app.router.add_get("/admin", _dashboard_handler)
-
-    # 3. S3 routes (GET / for ListBuckets + catch-all)
     handler.setup_routes(app)
 
-    # 4. Multipart upload lifecycle
     app.on_startup.append(handler._start_cleanup)
     app.on_shutdown.append(handler._stop_cleanup)
 
-    # ── Lifecycle ───────────────────────────────────────────────────────
+    # ── Lifecycle ────────────────────────────────────────────────────────
     async def on_startup(app: web.Application) -> None:
         pool = app.get("token_pool")
         if pool is not None:
@@ -107,7 +109,7 @@ def create_app(
     return app
 
 
-# ── Route helpers ───────────────────────────────────────────────────────
+# ── Route helpers ────────────────────────────────────────────────────────
 
 
 async def _dashboard_handler(_request: web.Request) -> web.Response:
@@ -123,8 +125,15 @@ def _register_admin_routes(app: web.Application) -> None:
         handle_resolve_token,
         handle_list_buckets,
         handle_bucket_detail,
+        handle_login,
+        handle_logout,
     )
 
+    # Auth (public — not protected by admin_auth_middleware)
+    app.router.add_post("/api/auth/login", handle_login)
+    app.router.add_post("/api/auth/logout", handle_logout)
+
+    # Admin API (protected)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/tokens", handle_list_tokens)
     app.router.add_post("/api/tokens", handle_add_token)

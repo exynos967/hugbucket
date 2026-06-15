@@ -9,8 +9,7 @@ from hugbucket.apps import s3 as s3_app
 
 
 def test_s3_main_starts_without_token(monkeypatch) -> None:
-    """App should start even without HF_TOKEN (user can add via admin panel)."""
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    """App should start without any pre-configured tokens (config via admin panel)."""
     monkeypatch.setattr(sys, "argv", ["hugbucket"])
 
     # Prevent actual server startup
@@ -22,7 +21,6 @@ def test_s3_main_starts_without_token(monkeypatch) -> None:
 def test_s3_main_starts(monkeypatch) -> None:
     seen = {}
 
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
     monkeypatch.setattr(sys, "argv", ["hugbucket"])
 
     backend = MagicMock()

@@ -1,7 +1,7 @@
 """Integration tests against live HF API.
 
-These tests require HF_TOKEN and HF_NAMESPACE env vars.
-Run with: uv run pytest -m integration
+These tests require HF_TOKEN env var.
+Run with: HF_TOKEN=hf_xxx uv run pytest -m integration
 Skip with: uv run pytest -m 'not integration'
 """
 
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import tempfile
 import time
 
 import pytest
@@ -20,32 +21,32 @@ from hugbucket.bridge import Bridge
 @pytest.fixture
 def config(hf_token: str) -> Config:
     return Config(
-        hf_token=hf_token,
         hf_namespace=os.environ.get("HF_NAMESPACE", "ninavacabsa"),
     )
 
 
 @pytest.fixture
-async def bridge(config: Config):
-    b = Bridge(config=config)
+async def bridge(config: Config, hf_token: str):
+    """Create a Bridge wired to a single-token pool (integration test)."""
+    from hugbucket.admin.store import ConfigStore, TokenConfig
+    from hugbucket.admin.token_pool import TokenPool
+
+    # Create temp tokens.json with the env token
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        f.write('{"tokens":[{"token":"' + hf_token + '","label":"test","namespace":"' + config.hf_namespace + '","healthy":true,"last_checked":0}]}')
+        tmp_path = f.name
+
+    store = ConfigStore(tmp_path)
+    pool = TokenPool(store)
+    config.tokens_file = tmp_path
+
+    b = Bridge(config=config, _token_pool=pool)
     yield b
     await b.close()
+    os.unlink(tmp_path)
 
 
 # Unique bucket name per test run to avoid collisions
-TEST_BUCKET = f"test-{int(time.time()) % 100000}"
-
-
-@pytest.mark.integration
-class TestBucketOperations:
-    """Test bucket CRUD against live HF API."""
-
-    async def test_create_and_delete_bucket(self, bridge: Bridge) -> None:
-        bucket_name = f"pytest-{int(time.time()) % 100000}"
-        try:
-            await bridge.create_bucket(bucket_name)
-            info = await bridge.head_bucket(bucket_name)
-            assert info is not None
         finally:
             await bridge.delete_bucket(bucket_name)
 
