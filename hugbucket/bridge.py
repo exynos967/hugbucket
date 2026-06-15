@@ -337,11 +337,61 @@ class HFStorageBackend:
     def token_pool(self):
         return self._token_pool
 
+    # ---- Unified bucket pool (all namespaces merged) ------------------------
+
+    # bucket_name → namespace cache (populated by list_buckets, lazy fallback)
+    _bucket_ns_cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    async def _resolve_bucket_ns(self, bucket_name: str) -> str | None:
+        """Find which namespace owns *bucket_name*.
+
+        Checks all healthy tokens' namespaces.  Caches the result so
+        subsequent lookups are O(1).
+        """
+        if bucket_name in self._bucket_ns_cache:
+            return self._bucket_ns_cache[bucket_name]
+
+        if self._token_pool is None:
+            return self.config.hf_namespace or None
+
+        pool = self._token_pool
+        await pool.load()
+        for ns in pool.all_namespaces:
+            try:
+                entry = await pool.get_token_for_namespace(ns)
+                if entry is None:
+                    continue
+                info = await self.hub.get_bucket_info(
+                    f"{ns}/{bucket_name}", token=entry.token
+                )
+                if info is not None:
+                    self._bucket_ns_cache[bucket_name] = ns
+                    return ns
+            except Exception:
+                continue
+        return None
+
     def _bucket_id(self, bucket_name: str) -> str:
-        """Convert S3 bucket name to HF bucket_id (namespace/name)."""
+        """Convert S3 bucket name to HF bucket_id (namespace/name).
+
+        Uses cached namespace mapping populated by ``list_buckets`` or
+        ``_resolve_bucket_ns``.  Falls back to configured namespace.
+        """
         if "/" in bucket_name:
             return bucket_name
+        ns = self._bucket_ns_cache.get(bucket_name)
+        if ns:
+            return f"{ns}/{bucket_name}"
         return f"{self.config.hf_namespace}/{bucket_name}"
+
+    async def _get_token_for_bucket(self, bucket_name: str) -> str | None:
+        """Return the token string for the namespace owning *bucket_name*."""
+        ns = self._bucket_ns_cache.get(bucket_name)
+        if ns and self._token_pool is not None:
+            entry = await self._token_pool.get_token_for_namespace(ns)
+            if entry:
+                return entry.token
+        return None
 
     # ---- Cached helpers ----
 
@@ -417,15 +467,59 @@ class HFStorageBackend:
     # ---- Bucket operations ----
 
     async def list_buckets(self) -> list[BucketInfo]:
-        return await self.hub.list_buckets()
+        """List buckets from all namespaces (unified pool)."""
+        if self._token_pool is None:
+            return await self.hub.list_buckets()
+
+        pool = self._token_pool
+        await pool.load()
+        all_buckets: list[BucketInfo] = []
+        for ns in pool.all_namespaces:
+            entry = await pool.get_token_for_namespace(ns)
+            if entry is None:
+                continue
+            try:
+                buckets = await self.hub.list_buckets(ns, token=entry.token)
+                for b in buckets:
+                    name = b.id.split("/")[-1] if "/" in b.id else b.id
+                    self._bucket_ns_cache[name] = ns
+                all_buckets.extend(buckets)
+            except Exception:
+                logger.warning("Failed to list buckets for namespace %s", ns, exc_info=True)
+        return all_buckets
 
     async def create_bucket(self, name: str, private: bool = False) -> str:
+        """Create a bucket in the least-busy token's namespace."""
+        if self._token_pool is not None:
+            pool = self._token_pool
+            await pool.load()
+            entry = await pool.acquire()
+            if entry and entry.namespace:
+                try:
+                    self.config.hf_namespace = entry.namespace
+                    url = await self.hub.create_bucket(name, private=private)
+                    self._bucket_ns_cache[name] = entry.namespace
+                    return url
+                finally:
+                    await pool.release(entry.token)
         return await self.hub.create_bucket(name, private=private)
 
     async def delete_bucket(self, name: str) -> None:
         await self.hub.delete_bucket(self._bucket_id(name))
+        self._bucket_ns_cache.pop(name, None)
 
     async def head_bucket(self, name: str) -> BucketInfo | None:
+        ns = self._bucket_ns_cache.get(name)
+        if ns and self._token_pool is not None:
+            entry = await self._token_pool.get_token_for_namespace(ns)
+            if entry:
+                try:
+                    return await self.hub.get_bucket_info(
+                        f"{ns}/{name}", token=entry.token
+                    )
+                except Exception:
+                    pass
+        # Fallback: probe config namespace
         try:
             return await self.hub.get_bucket_info(self._bucket_id(name))
         except Exception:

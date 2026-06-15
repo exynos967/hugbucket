@@ -60,14 +60,14 @@ async def handle_logout(request: web.Request) -> web.Response:
 async def handle_status(request: web.Request) -> web.Response:
     """GET /api/status — overall system status."""
     pool = request.app["token_pool"]
-    config = request.app["config"]
+    cfg = request.app["config"]
 
     pool_status = pool.status()
     return _json(
         {
             "server": {
-                "port": config.port,
-                "hf_endpoint": config.hf_endpoint,
+                "port": cfg.port,
+                "hf_endpoint": cfg.hf_endpoint,
             },
             "token_pool": {
                 "total": pool_status.total,
@@ -94,7 +94,6 @@ async def handle_add_token(request: web.Request) -> web.Response:
     """
     pool = request.app["token_pool"]
     bridge = request.app["bridge"]
-    config = request.app["config"]
 
     try:
         body = await request.json()
@@ -176,35 +175,22 @@ async def handle_resolve_token(request: web.Request) -> web.Response:
 
 
 async def handle_list_buckets(request: web.Request) -> web.Response:
-    """GET /api/buckets — list all buckets across all namespaces."""
+    """GET /api/buckets — list all buckets (unified across namespaces)."""
     bridge = request.app["bridge"]
-    pool = request.app["token_pool"]
 
-    all_buckets: list[dict] = []
-    namespaces = pool.all_namespaces
-
-    for ns in namespaces:
-        try:
-            entry = await pool.get_token_for_namespace(ns)
-            if entry is None:
-                continue
-            buckets = await bridge.hub.list_buckets(ns, token=entry.token)
-            for b in buckets:
-                all_buckets.append(
-                    {
-                        "id": b.id,
-                        "name": b.id.split("/")[-1] if "/" in b.id else b.id,
-                        "namespace": ns,
-                        "private": b.private,
-                        "created_at": b.created_at,
-                        "size": b.size,
-                        "total_files": b.total_files,
-                    }
-                )
-        except Exception as e:
-            logger.warning("Failed to list buckets for namespace %s: %s", ns, e)
-
-    # Sort by size descending
+    buckets = await bridge.list_buckets()
+    all_buckets = [
+        {
+            "id": b.id,
+            "name": b.id.split("/")[-1] if "/" in b.id else b.id,
+            "namespace": b.id.split("/")[0] if "/" in b.id else "",
+            "private": b.private,
+            "created_at": b.created_at,
+            "size": b.size,
+            "total_files": b.total_files,
+        }
+        for b in buckets
+    ]
     all_buckets.sort(key=lambda b: b["size"], reverse=True)
 
     return _json(
@@ -220,32 +206,25 @@ async def handle_list_buckets(request: web.Request) -> web.Response:
 async def handle_bucket_detail(request: web.Request) -> web.Response:
     """GET /api/buckets/{namespace}/{name} — get detailed bucket info."""
     bridge = request.app["bridge"]
-    pool = request.app["token_pool"]
 
     namespace = request.match_info["namespace"]
     name = request.match_info["name"]
-    bucket_id = f"{namespace}/{name}"
 
-    # Find the right token for this namespace
-    entry = await pool.get_token_for_namespace(namespace)
-    if entry is None:
-        return _error(f"命名空间 {namespace} 没有可用的 Token", status=404)
+    info = await bridge.head_bucket(name)
+    if info is None or info.id != f"{namespace}/{name}":
+        return _error("存储桶不存在", status=404)
 
-    try:
-        info = await bridge.hub.get_bucket_info(bucket_id, token=entry.token)
-        return _json(
-            {
-                "id": info.id,
-                "name": name,
-                "namespace": namespace,
-                "private": info.private,
-                "created_at": info.created_at,
-                "size": info.size,
-                "total_files": info.total_files,
-            }
-        )
-    except Exception as e:
-        return _error(str(e), status=502)
+    return _json(
+        {
+            "id": info.id,
+            "name": name,
+            "namespace": namespace,
+            "private": info.private,
+            "created_at": info.created_at,
+            "size": info.size,
+            "total_files": info.total_files,
+        }
+    )
 
 
 def _mask(token: str) -> str:
