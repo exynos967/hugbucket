@@ -758,10 +758,15 @@ async function doEnsure() {
 // ═══ Bucket actions ═══
 async function deleteBucket(name, ns) {
   if (!confirm(`确认删除桶 "${name}"？此操作不可撤销。`)) return;
+  // Optimistic: remove from local data immediately, then sync with server
+  if (bucketsData) bucketsData.buckets = bucketsData.buckets.filter(b => b.name !== name);
+  renderAll();
   try {
     await api('/api/buckets/' + encodeURIComponent(ns) + '/' + encodeURIComponent(name), { method: 'DELETE' });
-    await refreshData();
-  } catch(e) { alert('删除失败: ' + e.message); }
+  } catch(e) {
+    alert('删除失败: ' + e.message);
+  }
+  await refreshData();
 }
 
 function renameBucketPrompt(oldName, ns) {
