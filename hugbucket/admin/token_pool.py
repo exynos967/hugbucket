@@ -22,11 +22,20 @@ class PoolStatus:
     tokens: list[dict]
 
 
-class TokenPool:
-    """Round-robin token pool with lazy health checking.
+# 429 backoff duration (seconds) — matches HF rate-limit window.
+_RATE_LIMIT_BACKOFF = 60
 
-    Provides the next available token for HF API requests.  Unhealthy
-    tokens are skipped; a background task periodically re-checks them.
+# How long a token stays "cooling" after 429 before retry.
+_COOLDOWN_SECONDS = 30
+
+
+class TokenPool:
+    """Least-in-flight token pool with 429-aware backoff.
+
+    - **acquire**: returns the healthy token with fewest in-flight
+      requests, excluding tokens cooling after a 429.
+    - **release**: decrements in-flight; if *rate_limited* is True the
+      token enters a 30-second cooldown.
 
     Thread-safe for synchronous access from HubClient's token getter.
     """
@@ -38,6 +47,9 @@ class TokenPool:
         self._lock: asyncio.Lock = asyncio.Lock()
         self._sync_lock: threading.Lock = threading.Lock()
         self._loaded: bool = False
+        # Runtime tracking — keyed by token string (not index — survives reorder)
+        self._in_flight: dict[str, int] = {}
+        self._cooldown_until: dict[str, float] = {}
 
     # -- public API ---------------------------------------------------------
 
@@ -54,39 +66,74 @@ class TokenPool:
         self._config = self._store.load()
         logger.info("Token pool reloaded: %d tokens", len(self._config.tokens))
 
-    def get_next_sync(self) -> TokenConfig | None:
-        """Synchronous version of get_next — safe to call from any thread."""
-        tokens = self._config.tokens
-        if not tokens:
-            return None
-        healthy = [t for t in tokens if t.healthy]
-        if not healthy:
-            return None
+    # -- acquire / release ---------------------------------------------------
+
+    def _candidates(self) -> list[str]:
+        """Return token strings of healthy tokens not in cooldown."""
+        now = time.time()
+        result: list[str] = []
+        for t in self._config.tokens:
+            if not t.healthy:
+                continue
+            if self._cooldown_until.get(t.token, 0) > now:
+                continue
+            result.append(t.token)
+        return result
+
+    def acquire_sync(self) -> TokenConfig | None:
+        """Pick the healthy token with fewest in-flight requests (sync).
+
+        Returns None when no token is available.
+        """
         with self._sync_lock:
-            self._index = self._index % len(healthy)
-            token = healthy[self._index]
-            self._index = (self._index + 1) % len(healthy)
-            return token
+            candidates = self._candidates()
+            if not candidates:
+                return None
+            # Least in-flight — tie-break by token for stability
+            best_token = min(candidates, key=lambda tk: (self._in_flight.get(tk, 0), tk))
+            self._in_flight[best_token] = self._in_flight.get(best_token, 0) + 1
+            for t in self._config.tokens:
+                if t.token == best_token:
+                    return t
+            return None
+
+    def release_sync(self, token: str, *, rate_limited: bool = False) -> None:
+        """Release a token previously acquired via ``acquire_sync``."""
+        with self._sync_lock:
+            cnt = self._in_flight.get(token, 0)
+            if cnt > 0:
+                self._in_flight[token] = cnt - 1
+            if rate_limited:
+                self._cooldown_until[token] = time.time() + _COOLDOWN_SECONDS
+                logger.warning("Token rate-limited, cooldown %ds", _COOLDOWN_SECONDS)
+
+    async def acquire(self) -> TokenConfig | None:
+        """Async version of ``acquire_sync``."""
+        await self.load()
+        async with self._lock:
+            candidates = self._candidates()
+            if not candidates:
+                return None
+            best_token = min(candidates, key=lambda tk: (self._in_flight.get(tk, 0), tk))
+            self._in_flight[best_token] = self._in_flight.get(best_token, 0) + 1
+            for t in self._config.tokens:
+                if t.token == best_token:
+                    return t
+            return None
+
+    async def release(self, token: str, *, rate_limited: bool = False) -> None:
+        """Async version of ``release_sync``."""
+        async with self._lock:
+            cnt = self._in_flight.get(token, 0)
+            if cnt > 0:
+                self._in_flight[token] = cnt - 1
+            if rate_limited:
+                self._cooldown_until[token] = time.time() + _COOLDOWN_SECONDS
+                logger.warning("Token rate-limited, cooldown %ds", _COOLDOWN_SECONDS)
 
     async def get_next(self) -> TokenConfig | None:
-        """Return the next healthy token (round-robin).
-
-        Returns None when no healthy tokens are available.
-        """
-        await self.load()
-        tokens = self._config.tokens
-        if not tokens:
-            return None
-
-        async with self._lock:
-            healthy = [t for t in tokens if t.healthy]
-            if not healthy:
-                return None
-
-            self._index = self._index % len(healthy)
-            token = healthy[self._index]
-            self._index = (self._index + 1) % len(healthy)
-            return token
+        """Deprecated alias — prefer ``acquire`` + ``release``."""
+        return await self.acquire()
 
     async def get_namespace(self, token: TokenConfig) -> str:
         """Return the cached namespace for *token*."""

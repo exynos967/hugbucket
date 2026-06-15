@@ -262,12 +262,17 @@ class HFStorageBackend:
     )
 
     def __post_init__(self) -> None:
-        # Wire up token-pool getter if available
         token_getter = None
+        token_releaser = None
         if self._token_pool is not None:
             token_getter = self._make_token_getter()
+            token_releaser = self._make_token_releaser()
 
-        self.hub = HubClient(config=self.config, _token_getter=token_getter)
+        self.hub = HubClient(
+            config=self.config,
+            _token_getter=token_getter,
+            _token_releaser=token_releaser,
+        )
         self.cas = CASClient(
             pool_size=self.config.http_pool_size,
             upload_timeout=self.config.cas_upload_timeout,
@@ -277,19 +282,39 @@ class HFStorageBackend:
         self._xorb_cache = _XorbCache(max_bytes=self.config.xorb_cache_max_bytes)
 
     def _make_token_getter(self):
-        """Return a callable that yields the next token from the pool."""
+        """Least-in-flight acquire: pick healthiest, least-busy token."""
         pool = self._token_pool
+        _current = [""]  # mutable cell shared with releaser
 
         def _get() -> str:
             try:
-                entry = pool.get_next_sync()
+                entry = pool.acquire_sync()
                 if entry is not None:
+                    _current[0] = entry.token
                     return entry.token
             except Exception:
-                logger.warning("Token pool get_next_sync failed", exc_info=True)
+                logger.warning("Token pool acquire failed", exc_info=True)
+            _current[0] = ""
             return ""
 
+        self.__current_token_cell = _current
         return _get
+
+    def _make_token_releaser(self):
+        """Release token back to pool with optional 429 marking."""
+        pool = self._token_pool
+        _current = getattr(self, "__current_token_cell", [""])
+
+        def _release(rate_limited: bool) -> None:
+            token = _current[0]
+            if not token:
+                return
+            try:
+                pool.release_sync(token, rate_limited=rate_limited)
+            except Exception:
+                logger.warning("Token pool release failed", exc_info=True)
+
+        return _release
 
     async def close(self) -> None:
         await self.hub.close()

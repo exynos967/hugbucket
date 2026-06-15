@@ -32,9 +32,9 @@ class HubClient:
     """Async client for HF Hub Bucket API.
 
     Supports dynamic token switching via *token_getter* — a callable that
-    returns the HF token to use for the next request.  This enables
-    round-robin load balancing across multiple tokens without restarting
-    the session.
+    returns the HF token string to use for the next request.  The companion
+    *token_releaser* callable is invoked after each request to track
+    in-flight counts and detect 429 rate-limiting.
 
     When *token_getter* is None, no Authorization header is sent.
     """
@@ -42,6 +42,7 @@ class HubClient:
     config: Config
     _session: aiohttp.ClientSession | None = field(default=None, repr=False)
     _token_getter: Callable[[], str] | None = field(default=None, repr=False)
+    _token_releaser: Callable[[bool], None] | None = field(default=None, repr=False)
 
     def _get_token(self) -> str:
         if self._token_getter is not None:
@@ -49,6 +50,23 @@ class HubClient:
             if token:
                 return token
         return ""
+
+    def release_token(self, exc: BaseException | None = None) -> None:
+        """Notify the token pool that this request is done.
+
+        Call after every HF API request (success or failure).
+        If *exc* is a 429 ``ClientResponseError`` the token is marked
+        rate-limited.
+        """
+        if self._token_releaser is None:
+            return
+        rate_limited = False
+        if exc is not None:
+            # aiohttp may not be importable at type-check time
+            rate_limited = (
+                hasattr(exc, "status") and getattr(exc, "status", 0) == 429
+            )
+        self._token_releaser(rate_limited)
 
     def _base_headers(self) -> dict[str, str]:
         return {"User-Agent": "hugbucket/0.1.0"}
