@@ -201,6 +201,8 @@ class HubClient:
         bucket_id: str,
         prefix: str = "",
         recursive: bool = False,
+        *,
+        token: str | None = None,
     ) -> list[BucketFile]:
         """List files/dirs in a bucket."""
         session = await self._ensure_session()
@@ -214,9 +216,15 @@ class HubClient:
         if recursive:
             params["recursive"] = "true"
 
+        req_headers = (
+            {"Authorization": f"Bearer {token}"}
+            if token
+            else self._auth_headers()
+        )
+
         files: list[BucketFile] = []
         while url:
-            async with session.get(url, params=params, headers=self._auth_headers()) as resp:
+            async with session.get(url, params=params, headers=req_headers) as resp:
                 resp.raise_for_status()
                 items = await resp.json()
                 for d in items:

@@ -391,7 +391,7 @@ class HFStorageBackend:
         for b in all_buckets:
             bucket_id = f"{b['namespace']}/{b['name']}"
             try:
-                files = await self.hub.list_bucket_tree(bucket_id, recursive=True)
+                files = await self.hub.list_bucket_tree(bucket_id, recursive=True, token=b["token"])
                 for f in files:
                     if f.type != "file":
                         continue
