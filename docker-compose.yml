@@ -1,0 +1,32 @@
+services:
+  hugbucket:
+    image: ghcr.io/exynos967/hugbucket:latest
+    # 或者本地构建:
+    # build: .
+    container_name: hugbucket
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # S3-compatible gateway
+      - "9001:9001"   # Admin management panel
+    environment:
+      # S3 认证凭证（访问 S3 Gateway 时需要）
+      - AWS_ACCESS_KEY_ID=hugbucket
+      - AWS_SECRET_ACCESS_KEY=hugbucket
+      # 可选：单 Token 回退模式（当 tokens.json 中没有配置 Token 时使用）
+      # - HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxx
+      # Token 配置文件存储路径
+      - HUGBUCKET_TOKENS_FILE=/data/tokens.json
+    volumes:
+      # 持久化 Token 配置（通过 Admin 面板管理，无需重启容器）
+      - hugbucket_data:/data
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  hugbucket_data:
+    driver: local

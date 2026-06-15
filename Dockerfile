@@ -12,6 +12,10 @@ RUN uv sync --no-dev --no-install-project
 COPY . .
 RUN uv sync --no-dev
 
-EXPOSE 9000
+# Ensure writable data directory for tokens.json
+RUN mkdir -p /data
+ENV HUGBUCKET_TOKENS_FILE=/data/tokens.json
+
+EXPOSE 9000 9001
 
 ENTRYPOINT ["uv", "run", "hugbucket"]
