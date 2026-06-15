@@ -531,7 +531,7 @@ async def s3_auth_middleware(
 ) -> web.StreamResponse:
     """aiohttp middleware that enforces AWS Signature V2/V4 on every request."""
     # Admin panel and API routes bypass S3 auth
-    if request.path == "/admin" or request.path.startswith("/api/"):
+    if request.path == "/admin" or request.path.startswith("/admin/") or request.path.startswith("/api/"):
         return await handler(request)
 
     config: Config = request.app["config"]

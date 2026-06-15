@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from importlib.resources import files
 
 from aiohttp import web
@@ -86,11 +85,14 @@ def create_app(
 
         if not config.hf_namespace:
             try:
-                config.hf_namespace = await backend.resolve_namespace()
-                logger.info("  Resolved HF namespace: %s", config.hf_namespace)
+                ns = await backend.resolve_namespace()
+                if ns:
+                    config.hf_namespace = ns
+                    logger.info("  Resolved HF namespace: %s", ns)
+                else:
+                    logger.warning("  No healthy tokens — namespace not resolved")
             except Exception as exc:
                 logger.error("Failed to resolve HF namespace: %s", exc)
-                sys.exit(1)
 
         logger.info("=" * 60)
         logger.info("  HugBucket: http://%s:%s", config.host, config.port)

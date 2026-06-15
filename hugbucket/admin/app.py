@@ -44,7 +44,8 @@ async def handle_login(request: web.Request) -> web.Response:
     if provided != password:
         return _error("密码错误", status=401)
 
-    _, cookie = create_session_cookie(password)
+    secure = request.url.scheme == "https"
+    _, cookie = create_session_cookie(password, secure=secure)
     return web.json_response({"ok": True}, headers={"Set-Cookie": cookie})
 
 
@@ -82,7 +83,8 @@ async def handle_status(request: web.Request) -> web.Response:
 async def handle_list_tokens(request: web.Request) -> web.Response:
     """GET /api/tokens — list all configured tokens."""
     pool = request.app["token_pool"]
-    return _json(pool.status())
+    s = pool.status()
+    return _json({"total": s.total, "healthy": s.healthy, "unhealthy": s.unhealthy, "strategy": s.strategy, "tokens": s.tokens})
 
 
 async def handle_add_token(request: web.Request) -> web.Response:

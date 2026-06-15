@@ -249,7 +249,7 @@ class HFStorageBackend:
     config: Config
     hub: HubClient = field(init=False)
     cas: CASClient = field(init=False)
-    _token_pool: object | None = field(default=None, repr=False)
+    _token_pool: object | None = field(default=None, repr=False)  # TokenPool (circular import)
     _token_cache: dict[str, XetConnectionInfo] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -286,7 +286,7 @@ class HFStorageBackend:
                 if entry is not None:
                     return entry.token
             except Exception:
-                pass
+                logger.warning("Token pool get_next_sync failed", exc_info=True)
             return ""
 
         return _get

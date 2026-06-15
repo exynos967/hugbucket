@@ -327,11 +327,17 @@ class HubClient:
         url = self._api_url(f"/api/buckets/{bucket_id}/xet-{token_type}-token")
         async with session.get(url, headers=self._auth_headers()) as resp:
             resp.raise_for_status()
-            return XetConnectionInfo(
-                cas_url=resp.headers["X-Xet-Cas-Url"],
-                access_token=resp.headers["X-Xet-Access-Token"],
-                token_expiration=int(resp.headers["X-Xet-Token-Expiration"]),
-            )
+            try:
+                return XetConnectionInfo(
+                    cas_url=resp.headers["X-Xet-Cas-Url"],
+                    access_token=resp.headers["X-Xet-Access-Token"],
+                    token_expiration=int(resp.headers["X-Xet-Token-Expiration"]),
+                )
+            except KeyError as e:
+                raise aiohttp.ClientResponseError(
+                    resp.request_info, resp.history, status=502,
+                    message=f"Missing Xet header: {e}", headers=resp.headers,
+                )
 
     # ---- File metadata (HEAD) ----
 

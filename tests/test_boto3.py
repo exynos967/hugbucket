@@ -50,9 +50,9 @@ def s3_server(hf_token: str):
 
     async def _run():
         nonlocal server, bridge
-        config = Config(hf_token=hf_token)
+        config = Config()
         bridge = Bridge(config=config)
-        config.hf_namespace = await bridge.hub.whoami()
+        config.hf_namespace = await bridge.hub.whoami(token=hf_token)
 
         handler = S3Handler(bridge)
         app = web.Application(

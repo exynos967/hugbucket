@@ -21,16 +21,16 @@ def _sign(secret: str, payload: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
-def create_session_cookie(password: str) -> tuple[str, str]:
+def create_session_cookie(password: str, *, secure: bool = True) -> tuple[str, str]:
     """Return (cookie_value, set_cookie_header_value)."""
     expiry = int(time.time()) + COOKIE_MAX_AGE
     payload = f"{expiry}"
     sig = _sign(password, payload)
     value = f"{payload}.{sig}"
-    return value, (
-        f"{COOKIE_NAME}={value}; Path={COOKIE_PATH}; Max-Age={COOKIE_MAX_AGE}; "
-        "HttpOnly; SameSite=Strict"
-    )
+    flags = f"Path={COOKIE_PATH}; Max-Age={COOKIE_MAX_AGE}; HttpOnly; SameSite=Strict"
+    if secure:
+        flags += "; Secure"
+    return value, f"{COOKIE_NAME}={value}; {flags}"
 
 
 def verify_session(request: web.Request, password: str) -> bool:
@@ -93,7 +93,7 @@ def admin_auth_middleware(password: str):
             return await handler(request)
 
         # Serve login page or return 401
-        if is_admin or path.startswith("/admin"):
+        if is_admin:
             nonlocal _login_page_html
             if _login_page_html is None:
                 from importlib.resources import files
