@@ -342,8 +342,20 @@ class HFStorageBackend:
     # key → real_bucket_name cache for the virtual pool bucket
     _pool_file_cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
+    # Cache of _pool_all_buckets result (short TTL for freshness)
+    _pool_buckets_cache: tuple[float, list[dict]] = field(
+        default_factory=lambda: (0, []), init=False, repr=False
+    )
+
     async def _pool_all_buckets(self) -> list[dict]:
-        """Return [(name, namespace, token), ...] for all real buckets."""
+        """Return [(name, namespace, token), ...] for all real buckets.
+
+        Cached for 30 seconds to avoid hitting HF API on every list_objects.
+        """
+        now = time.monotonic()
+        if self._pool_buckets_cache[1] and (now - self._pool_buckets_cache[0]) < 30:
+            return self._pool_buckets_cache[1]
+
         result: list[dict] = []
         if self._token_pool is None:
             return result
@@ -361,7 +373,13 @@ class HFStorageBackend:
                     result.append({"name": name, "namespace": ns, "token": entry.token})
             except Exception:
                 logger.warning("Failed to list buckets for ns %s", ns, exc_info=True)
+
+        self._pool_buckets_cache = (now, result)
         return result
+
+    def _invalidate_pool_cache(self) -> None:
+        """Clear pool bucket cache (call after creating/deleting a bucket)."""
+        self._pool_buckets_cache = (0, [])
 
     async def pool_list_objects(self, prefix: str = "", delimiter: str = "",
                                  max_keys: int = 1000,
@@ -444,6 +462,7 @@ class HFStorageBackend:
                     self.config.hf_namespace = ns
                     await self.hub.create_bucket(real_bucket)
                     self._bucket_ns_cache[real_bucket] = ns
+                    self._invalidate_pool_cache()
 
                 self.config.hf_namespace = ns
                 self._pool_file_cache[key] = real_bucket
