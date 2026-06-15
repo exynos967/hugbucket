@@ -333,6 +333,88 @@ async def handle_ensure_buckets(request: web.Request) -> web.Response:
     return _json({"ok": True, "created": created, "skipped": skipped, "details": result})
 
 
+# -- bucket mutation handlers -----------------------------------------------
+
+
+async def handle_delete_bucket(request: web.Request) -> web.Response:
+    """DELETE /api/buckets/{namespace}/{name} — delete a bucket."""
+    bridge = request.app["bridge"]
+    namespace = request.match_info["namespace"]
+    name = request.match_info["name"]
+
+    try:
+        await bridge.hub.delete_bucket(f"{namespace}/{name}")
+        bridge._bucket_ns_cache.pop(name, None)
+        return _json({"ok": True})
+    except Exception as e:
+        return _error(f"删除失败: {e}", status=502)
+
+
+async def handle_rename_bucket(request: web.Request) -> web.Response:
+    """POST /api/buckets/rename — rename a bucket {old_name, new_name, namespace}."""
+    bridge = request.app["bridge"]
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("请求体不是合法的 JSON")
+
+    old_name = (body.get("old_name") or "").strip()
+    new_name = (body.get("new_name") or "").strip()
+    namespace = (body.get("namespace") or "").strip()
+
+    if not old_name or not new_name:
+        return _error("old_name 和 new_name 不能为空")
+
+    # Resolve namespace if not provided
+    if not namespace:
+        namespace = bridge._bucket_ns_cache.get(old_name)
+    if not namespace:
+        return _error("无法确定桶的 namespace", status=400)
+
+    bucket_id = f"{namespace}/{old_name}"
+    new_bucket_id = f"{namespace}/{new_name}"
+
+    try:
+        await bridge.hub._send_raw_request(
+            "POST", "/api/repos/move",
+            json={"fromRepo": bucket_id, "toRepo": new_bucket_id, "type": "bucket"},
+        )
+        bridge._bucket_ns_cache.pop(old_name, None)
+        bridge._bucket_ns_cache[new_name] = namespace
+        return _json({"ok": True, "namespace": namespace})
+    except Exception as e:
+        return _error(f"重命名失败: {e}", status=502)
+
+
+# -- token edit handler ------------------------------------------------------
+
+
+async def handle_edit_token(request: web.Request) -> web.Response:
+    """PUT /api/tokens/{index} — edit token label."""
+    pool = request.app["token_pool"]
+
+    try:
+        index = int(request.match_info["index"])
+    except ValueError:
+        return _error("无效的索引")
+
+    try:
+        body = await request.json()
+    except Exception:
+        return _error("请求体不是合法的 JSON")
+
+    label = body.get("label")
+    if label is not None:
+        label = label.strip()
+
+    try:
+        entry = await pool.update_token(index, label=label)
+        return _json({"ok": True, "label": entry.label})
+    except IndexError:
+        return _error("Token 索引不存在", status=404)
+
+
 def _mask(token: str) -> str:
     if len(token) <= 8:
         return token[:2] + "****"

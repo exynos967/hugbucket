@@ -395,6 +395,19 @@ class HubClient:
                 xet_hash=resp.headers.get("X-Xet-Hash", ""),
             )
 
+    # ---- Raw request helper (for operations not yet wrapped) ----------------
+
+    async def _send_raw_request(
+        self, method: str, path: str, *, json: dict | None = None
+    ) -> dict:
+        """Send an arbitrary request to the HF API and return JSON body."""
+        session = await self._ensure_session()
+        url = self._api_url(path)
+        headers = {"Content-Type": "application/json", **self._auth_headers()}
+        async with session.request(method, url, json=json, headers=headers) as resp:
+            resp.raise_for_status()
+            return await resp.json()
+
     # ---- Helpers ----
 
     @staticmethod
