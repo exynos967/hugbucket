@@ -16,6 +16,6 @@ RUN uv sync --no-dev
 RUN mkdir -p /data
 ENV HUGBUCKET_TOKENS_FILE=/data/tokens.json
 
-EXPOSE 9000 9001
+EXPOSE 9000
 
 ENTRYPOINT ["uv", "run", "hugbucket"]

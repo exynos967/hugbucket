@@ -10,16 +10,15 @@ S3-compatible gateway for Hugging Face Storage Buckets.
 docker compose up -d
 ```
 
-服务启动后：
-- **S3 Gateway**: `http://localhost:9000`
-- **Admin 管理面板**: `http://localhost:9001`
+服务启动后访问 `http://localhost:9000`：
+- 浏览器打开 → **Admin 管理面板**
+- S3 客户端连接 → **S3-compatible API**
 
 ### Docker
 
 ```bash
 docker run -d \
   -p 9000:9000 \
-  -p 9001:9001 \
   -e AWS_ACCESS_KEY_ID=hugbucket \
   -e AWS_SECRET_ACCESS_KEY=hugbucket \
   -v hugbucket_data:/data \
@@ -28,21 +27,19 @@ docker run -d \
 
 ## 多 Token 负载均衡
 
-HugBucket 支持配置多个 HF Token 实现负载均衡：
+配置多个 HF Token 实现请求负载均衡：
 
-1. 启动后打开 **Admin 管理面板** `http://localhost:9001`
+1. 浏览器打开 `http://localhost:9000` 进入 Admin 管理面板
 2. 在「Token 管理」页面添加多个 HF Token
 3. 系统自动采用 **Round Robin** 策略轮询分发请求
 
-Token 配置持久化存储在 `tokens.json` 中，无需重启服务。
+Token 配置持久化存储在 `tokens.json`，无需重启服务。
 
-### 单 Token 模式（回退）
+### 单 Token 模式
 
-如果 `tokens.json` 中没有配置任何 Token，系统会自动回退使用环境变量 `HF_TOKEN`。
+如果 `tokens.json` 中没有配置 Token，自动回退使用环境变量 `HF_TOKEN`。
 
 ## Usage
-
-#### AWS CLI
 
 ```bash
 aws --endpoint-url http://localhost:9000 s3 ls
@@ -53,7 +50,7 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/file.txt
 
 | Variable | Description |
 | --- | --- |
-| `HF_TOKEN` | 单 Token 回退模式（推荐通过 Admin 面板配置多 Token） |
+| `HF_TOKEN` | 单 Token 回退模式 |
 | `AWS_ACCESS_KEY_ID` | S3 access key |
 | `AWS_SECRET_ACCESS_KEY` | S3 secret key |
 | `HUGBUCKET_TOKENS_FILE` | Token 配置文件路径（默认 `./tokens.json`） |
@@ -62,7 +59,7 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/file.txt
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/status` | 系统状态总览 |
+| `GET` | `/api/status` | 系统状态 |
 | `GET` | `/api/tokens` | Token 列表 |
 | `POST` | `/api/tokens` | 添加 Token |
 | `DELETE` | `/api/tokens/{index}` | 删除 Token |
@@ -72,11 +69,8 @@ aws --endpoint-url http://localhost:9000 s3 cp file.txt s3://my-bucket/file.txt
 
 ## Development
 
-本项目使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
-
 ```bash
 uv sync
 
-# 开发模式启动
 HUGBUCKET_TOKENS_FILE=./tokens.json uv run hugbucket
 ```
