@@ -63,7 +63,7 @@ def main() -> None:
         logger.warning("  No HF_TOKEN env var and no tokens.json found.")
         logger.warning("  The gateway will start, but you must configure")
         logger.warning("  at least one HF token via the admin panel:")
-        logger.warning(f"  → http://localhost:{config.port}")
+        logger.warning(f"  → http://localhost:{config.port}/admin")
         logger.warning("=" * 60)
 
     if not config.s3_access_key and not config.s3_secret_key:

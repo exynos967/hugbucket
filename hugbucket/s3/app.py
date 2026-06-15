@@ -44,11 +44,11 @@ def create_app(
     # 1. Admin API routes (explicit paths, highest priority)
     _register_admin_routes(app)
 
-    # 2. Hybrid root: dashboard (browser) or S3 ListBuckets (S3 client)
-    _register_root(app, handler)
+    # 2. Admin dashboard at /admin
+    app.router.add_get("/admin", _dashboard_handler)
 
-    # 3. S3 catch-all for all other bucket/object operations
-    app.router.add_route("*", "/{path:.*}", handler.handle_request)
+    # 3. S3 routes (GET / for ListBuckets + catch-all)
+    handler.setup_routes(app)
 
     # 4. Multipart upload lifecycle
     app.on_startup.append(handler._start_cleanup)
@@ -93,7 +93,7 @@ def create_app(
         logger.info("  HF namespace: %s", config.hf_namespace)
         logger.info("")
         logger.info("  S3 CLI:   aws --endpoint-url http://localhost:%s s3 ls", config.port)
-        logger.info("  Admin UI: http://localhost:%s", config.port)
+        logger.info("  Admin UI: http://localhost:%s/admin", config.port)
         logger.info("=" * 60)
 
     async def on_shutdown(app: web.Application) -> None:
@@ -105,6 +105,12 @@ def create_app(
 
 
 # ── Route helpers ───────────────────────────────────────────────────────
+
+_DASHBOARD_HTML = (_TPL_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+
+async def _dashboard_handler(_request: web.Request) -> web.Response:
+    return web.Response(text=_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
 
 
 def _register_admin_routes(app: web.Application) -> None:
@@ -125,16 +131,3 @@ def _register_admin_routes(app: web.Application) -> None:
     app.router.add_post("/api/tokens/{index}/resolve", handle_resolve_token)
     app.router.add_get("/api/buckets", handle_list_buckets)
     app.router.add_get("/api/buckets/{namespace}/{name}", handle_bucket_detail)
-
-
-def _register_root(app: web.Application, handler: S3Handler) -> None:
-    """GET / → admin dashboard (browser) or S3 ListBuckets (S3 client)."""
-
-    dashboard_html = (_TPL_DIR / "dashboard.html").read_text(encoding="utf-8")
-
-    async def root_handler(request: web.Request) -> web.Response:
-        if "text/html" in request.headers.get("Accept", ""):
-            return web.Response(text=dashboard_html, content_type="text/html; charset=utf-8")
-        return await handler.handle_list_buckets(request)
-
-    app.router.add_route("GET", "/", root_handler)
