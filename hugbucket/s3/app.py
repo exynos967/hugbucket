@@ -55,9 +55,6 @@ def create_app(
     app.router.add_get("/admin", _dashboard_handler)
     handler.setup_routes(app)
 
-    app.on_startup.append(handler._start_cleanup)
-    app.on_shutdown.append(handler._stop_cleanup)
-
     # ── Lifecycle ────────────────────────────────────────────────────────
     async def on_startup(app: web.Application) -> None:
         pool = app.get("token_pool")

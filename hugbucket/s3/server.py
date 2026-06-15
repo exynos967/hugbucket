@@ -499,23 +499,26 @@ class S3Handler:
             )
             total_size = file_info.size
 
-            # Parse Range header
+            # Parse Range header (RFC 7233)
             byte_range: tuple[int, int] | None = None
             range_header = request.headers.get("Range", "")
             if range_header and range_header.startswith("bytes="):
                 range_spec = range_header[6:]  # strip "bytes="
                 parts = range_spec.split("-")
-                start = int(parts[0]) if parts[0] else 0
-                end = int(parts[1]) if parts[1] else total_size - 1
-                end = min(end, total_size - 1)
+                if range_spec.startswith("-"):
+                    # Suffix range: bytes=-N  → last N bytes
+                    suffix = int(parts[1])
+                    if suffix <= 0:
+                        return web.Response(status=416, headers={"Content-Range": f"bytes */{total_size}"})
+                    start = max(0, total_size - suffix)
+                    end = total_size - 1
+                else:
+                    start = int(parts[0]) if parts[0] else 0
+                    end = int(parts[1]) if len(parts) > 1 and parts[1] else total_size - 1
+                    end = min(end, total_size - 1)
 
                 if start >= total_size or start > end:
-                    return web.Response(
-                        status=416,
-                        headers={
-                            "Content-Range": f"bytes */{total_size}",
-                        },
-                    )
+                    return web.Response(status=416, headers={"Content-Range": f"bytes */{total_size}"})
                 byte_range = (start, end)
 
             # Get the stream — bridge skips irrelevant xorbs when

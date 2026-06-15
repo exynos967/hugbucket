@@ -139,11 +139,16 @@ def error_xml(
 def get_bucket_location_xml(location: str = "us-east-1") -> bytes:
     """Build GetBucketLocationResult XML.
 
-    Returns the region/location constraint for a bucket.  S3 clients
-    (e.g. S3 Browser) call ``GET /{bucket}?location`` to discover the
-    region before constructing presigned URLs.
+    S3 clients (e.g. S3 Browser) call ``GET /{bucket}?location`` to
+    discover the bucket region for presigned-URL construction.
+
+    AWS omits ``xmlns`` for the default us-east-1 region and only
+    includes it for non-default regions.  We mirror that behaviour.
     """
-    root = _make_root("LocationConstraint")
+    if location == "us-east-1":
+        root = Element("LocationConstraint")
+    else:
+        root = _make_root("LocationConstraint")
     root.text = location
     return to_xml_bytes(root)
 
