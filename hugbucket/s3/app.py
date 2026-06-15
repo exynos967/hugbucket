@@ -111,7 +111,7 @@ def create_app(
 
 
 async def _dashboard_handler(_request: web.Request) -> web.Response:
-    return web.Response(text=_DASHBOARD_HTML, content_type="text/html; charset=utf-8")
+    return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
 
 
 def _register_admin_routes(app: web.Application) -> None:
