@@ -2,28 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 from hugbucket.apps import s3 as s3_app
 
 
-def test_s3_main_requires_hf_token(monkeypatch) -> None:
+def test_s3_main_starts_without_token(monkeypatch) -> None:
+    """App should start even without HF_TOKEN (user can add via admin panel)."""
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket"])
 
-    import pytest
+    # Prevent actual server startup by mocking asyncio.run
+    monkeypatch.setattr(asyncio, "run", lambda coro: None)
 
-    with pytest.raises(SystemExit) as exc:
-        s3_app.main()
-
-    assert exc.value.code == 1
+    s3_app.main()
 
 
 def test_s3_main_starts(monkeypatch) -> None:
     seen = {}
-
-    class _FakeApp(dict):
-        pass
 
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     monkeypatch.setattr(s3_app.sys, "argv", ["hugbucket"])
@@ -32,27 +29,37 @@ def test_s3_main_starts(monkeypatch) -> None:
     monkeypatch.setattr(
         s3_app,
         "HFStorageBackend",
-        lambda config: backend,
+        lambda config, _token_pool=None: backend,
     )
 
-    def _create_app(*, config, backend, max_upload_bytes):
+    class _FakeApp(dict):
+        def __init__(self):
+            super().__init__()
+            self.on_startup = [lambda app: None]  # aiohttp Signal is list-like
+            self.on_shutdown = []
+
+    def _create_s3_app(*, config, backend, max_upload_bytes):
         seen["config"] = config
         seen["backend"] = backend
         seen["max_upload_bytes"] = max_upload_bytes
-        return _FakeApp()
+        app = _FakeApp()
+        app["config"] = config
+        return app
 
-    monkeypatch.setattr(s3_app, "create_s3_app", _create_app)
+    monkeypatch.setattr(s3_app, "create_s3_app", _create_s3_app)
 
-    def _run_app(app, host, port, print=None):
-        seen["run"] = (app, host, port, print)
+    # Prevent actual server startup
+    monkeypatch.setattr(asyncio, "run", lambda coro: None)
 
-    monkeypatch.setattr(s3_app.web, "run_app", _run_app)
+    # Prevent resolve_namespace from making real API calls
+    async def _resolve():
+        return "testuser"
+
+    backend.resolve_namespace = _resolve
 
     s3_app.main()
 
     assert seen["backend"] is backend
     assert seen["max_upload_bytes"] == 1024 * 1024 * 1024
-    _, host, port, print_fn = seen["run"]
-    assert host == "0.0.0.0"
-    assert port == 9000
-    assert print_fn is None
+    assert seen["config"].host == "0.0.0.0"
+    assert seen["config"].port == 9000
