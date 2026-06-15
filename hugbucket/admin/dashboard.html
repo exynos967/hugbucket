@@ -205,8 +205,8 @@
   .toggle button.active { background: #fff; color: #1e293b; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
 
   /* ═══ Row actions ─═�� */
-  .row-actions { opacity: 0; transition: opacity .15s; display: flex; gap: 4px; }
-  tr:hover .row-actions, .token-card:hover .row-actions { opacity: 1; }
+  .row-actions { display: flex; gap: 6px; }
+  @media (min-width: 769px) { .row-actions { opacity: 0.35; } tr:hover .row-actions, .token-card:hover .row-actions { opacity: 1; } }
 
   /* ═══ Mobile ═══ */
   @media (max-width: 768px) {
