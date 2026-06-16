@@ -292,6 +292,11 @@ class S3Handler:
         instead and produce corrupted presigned URL credentials.
         """
         try:
+            # Virtual pool bucket always exists — skip HF API probe
+            if self._is_pool_bucket(request, bucket):
+                body = get_bucket_location_xml("us-east-1")
+                return web.Response(status=200, content_type=XML_CONTENT, body=body)
+
             info = await self.bridge.head_bucket(bucket)
             if info is None:
                 return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
