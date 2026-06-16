@@ -158,12 +158,15 @@ class S3Handler:
         if not bucket:
             return await self.handle_list_buckets(request)
 
+        if self._is_pool_mode(request) and not self._is_pool_bucket(request, bucket):
+            return _s3_error(404, "NoSuchBucket", f"Bucket '{bucket}' not found")
+
         # Reject browser/crawler paths that are not valid S3 bucket names
         if not key and bucket in _IGNORED_PATHS:
             return _s3_error(
                 404,
                 "NoSuchBucket",
-                f"The specified bucket does not exist.",
+                "The specified bucket does not exist.",
                 resource=f"/{bucket}",
             )
 
@@ -251,6 +254,8 @@ class S3Handler:
         self, request: web.Request, bucket: str
     ) -> web.Response:
         try:
+            if self._is_pool_bucket(request, bucket):
+                return web.Response(status=200)
             await self.bridge.create_bucket(bucket)
             return web.Response(status=200)
         except Exception as e:
@@ -261,6 +266,8 @@ class S3Handler:
         self, request: web.Request, bucket: str
     ) -> web.Response:
         try:
+            if self._is_pool_bucket(request, bucket):
+                return web.Response(status=204)
             await self.bridge.delete_bucket(bucket)
             return web.Response(status=204)
         except Exception as e:
@@ -345,7 +352,10 @@ class S3Handler:
                     "The XML you provided did not contain any Object/Key elements.",
                 )
 
-            deleted, errors = await self.bridge.delete_objects(bucket, keys)
+            if self._is_pool_bucket(request, bucket):
+                deleted, errors = await self.bridge.pool_delete_objects(keys)
+            else:
+                deleted, errors = await self.bridge.delete_objects(bucket, keys)
 
             body_xml = delete_result_xml(deleted, errors or None)
             return web.Response(status=200, content_type=XML_CONTENT, body=body_xml)
@@ -364,6 +374,10 @@ class S3Handler:
     def _is_pool_bucket(self, request: web.Request, bucket: str) -> bool:
         config = request.app["config"]
         return bool(config.pool_bucket_name and bucket == config.pool_bucket_name)
+
+    def _is_pool_mode(self, request: web.Request) -> bool:
+        config = request.app["config"]
+        return bool(config.pool_bucket_name)
 
     async def handle_list_objects_v2(
         self, request: web.Request, bucket: str
@@ -472,7 +486,17 @@ class S3Handler:
                 )
             src_bucket, src_key = parts[0], parts[1]
 
-            result = await self.bridge.copy_object(src_bucket, src_key, bucket, key)
+            if self._is_pool_bucket(request, bucket):
+                pool_name = request.app["config"].pool_bucket_name
+                if src_bucket != pool_name:
+                    return _s3_error(
+                        404,
+                        "NoSuchBucket",
+                        f"Bucket '{src_bucket}' not found",
+                    )
+                result = await self.bridge.pool_copy_object(src_key, key)
+            else:
+                result = await self.bridge.copy_object(src_bucket, src_key, bucket, key)
 
             body = copy_object_result_xml(
                 etag=result["ETag"],
@@ -645,7 +669,10 @@ class S3Handler:
                 # folders; HugBucket uses a hidden .hugbucket_keep marker
                 # instead, so we check for it here.
                 if key.endswith("/"):
-                    exists = await self.bridge.head_directory(bucket, key)
+                    if self._is_pool_bucket(request, bucket):
+                        exists = await self.bridge.pool_head_directory(key)
+                    else:
+                        exists = await self.bridge.head_directory(bucket, key)
                     if exists:
                         return web.Response(
                             status=200,
@@ -865,7 +892,10 @@ class S3Handler:
                 )
 
                 # Upload as regular object
-                result = await self.bridge.put_object(bucket, key, data)
+                if self._is_pool_bucket(request, bucket):
+                    result = await self.bridge.pool_put_object(key, data)
+                else:
+                    result = await self.bridge.put_object(bucket, key, data)
 
                 etag = result["ETag"]
                 location = f"/{bucket}/{key}"

@@ -72,7 +72,9 @@ class HubClient:
     def _base_headers(self) -> dict[str, str]:
         return {"User-Agent": "hugbucket/0.1.0"}
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _auth_headers(self, token: str | None = None) -> dict[str, str]:
+        if token is not None:
+            return {"Authorization": f"Bearer {token}"}
         if self._token_override is not None:
             return {"Authorization": f"Bearer {self._token_override}"}
         token = self._get_token()
@@ -117,17 +119,27 @@ class HubClient:
     # ---- Bucket CRUD ----
 
     async def create_bucket(
-        self, name: str, *, private: bool = False, exist_ok: bool = True
+        self,
+        name: str,
+        *,
+        private: bool = False,
+        exist_ok: bool = True,
+        namespace: str | None = None,
+        token: str | None = None,
     ) -> str:
         """Create a bucket. Returns the bucket URL."""
         session = await self._ensure_session()
-        ns = self.config.hf_namespace
+        ns = namespace or self.config.hf_namespace
         url = self._api_url(f"/api/buckets/{ns}/{name}")
         body: dict = {}
         if private:
             body["private"] = True
 
-        async with session.post(url, json=body, headers=self._auth_headers()) as resp:
+        async with session.post(
+            url,
+            json=body,
+            headers=self._auth_headers(token),
+        ) as resp:
             if resp.status == 409 and exist_ok:
                 return f"{self.config.hf_endpoint}/buckets/{ns}/{name}"
             resp.raise_for_status()
@@ -247,7 +259,11 @@ class HubClient:
         return files
 
     async def get_paths_info(
-        self, bucket_id: str, paths: list[str]
+        self,
+        bucket_id: str,
+        paths: list[str],
+        *,
+        token: str | None = None,
     ) -> list[BucketFile]:
         """Batch get file info for specific paths."""
         session = await self._ensure_session()
@@ -257,7 +273,9 @@ class HubClient:
         for i in range(0, len(paths), PATHS_INFO_BATCH_SIZE):
             batch = paths[i : i + PATHS_INFO_BATCH_SIZE]
             async with session.post(
-                url, json={"paths": batch}, headers=self._auth_headers()
+                url,
+                json={"paths": batch},
+                headers=self._auth_headers(token),
             ) as resp:
                 resp.raise_for_status()
                 items = await resp.json()
@@ -282,6 +300,7 @@ class HubClient:
         bucket_id: str,
         add: list[dict] | None = None,
         delete: list[str] | None = None,
+        token: str | None = None,
     ) -> None:
         """Batch add/delete files via NDJSON.
 
@@ -295,13 +314,13 @@ class HubClient:
         if add:
             for i in range(0, len(add), BATCH_ADD_CHUNK_SIZE):
                 batch = add[i : i + BATCH_ADD_CHUNK_SIZE]
-                await self._send_ndjson_batch(session, url, batch, [])
+                await self._send_ndjson_batch(session, url, batch, [], token=token)
 
         # Process deletes in chunks of 1000
         if delete:
             for i in range(0, len(delete), BATCH_DELETE_CHUNK_SIZE):
                 batch = delete[i : i + BATCH_DELETE_CHUNK_SIZE]
-                await self._send_ndjson_batch(session, url, [], batch)
+                await self._send_ndjson_batch(session, url, [], batch, token=token)
 
     async def _send_ndjson_batch(
         self,
@@ -309,6 +328,7 @@ class HubClient:
         url: str,
         adds: list[dict],
         deletes: list[str],
+        token: str | None = None,
     ) -> None:
         import json
 
@@ -331,7 +351,7 @@ class HubClient:
         body = "\n".join(lines)
         req_headers = {
             "Content-Type": "application/x-ndjson",
-            **self._auth_headers(),
+            **self._auth_headers(token),
         }
         async with session.post(url, data=body.encode(), headers=req_headers) as resp:
             if resp.status >= 400:
@@ -341,20 +361,34 @@ class HubClient:
 
     # ---- Xet tokens ----
 
-    async def get_xet_write_token(self, bucket_id: str) -> XetConnectionInfo:
+    async def get_xet_write_token(
+        self,
+        bucket_id: str,
+        *,
+        token: str | None = None,
+    ) -> XetConnectionInfo:
         """Get Xet CAS write credentials."""
-        return await self._get_xet_token(bucket_id, "write")
+        return await self._get_xet_token(bucket_id, "write", token=token)
 
-    async def get_xet_read_token(self, bucket_id: str) -> XetConnectionInfo:
+    async def get_xet_read_token(
+        self,
+        bucket_id: str,
+        *,
+        token: str | None = None,
+    ) -> XetConnectionInfo:
         """Get Xet CAS read credentials."""
-        return await self._get_xet_token(bucket_id, "read")
+        return await self._get_xet_token(bucket_id, "read", token=token)
 
     async def _get_xet_token(
-        self, bucket_id: str, token_type: str
+        self,
+        bucket_id: str,
+        token_type: str,
+        *,
+        token: str | None = None,
     ) -> XetConnectionInfo:
         session = await self._ensure_session()
         url = self._api_url(f"/api/buckets/{bucket_id}/xet-{token_type}-token")
-        async with session.get(url, headers=self._auth_headers()) as resp:
+        async with session.get(url, headers=self._auth_headers(token)) as resp:
             resp.raise_for_status()
             try:
                 return XetConnectionInfo(

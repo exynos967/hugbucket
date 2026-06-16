@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from hugbucket.config import Config
-from hugbucket.hub.client import BucketFile
+from hugbucket.hub.client import BucketFile, XetConnectionInfo
 
 
 @pytest.fixture
@@ -333,5 +333,77 @@ class TestPoolListingCache:
         result = await bridge.pool_put_object("new.txt", b"new")
 
         assert result == {"ETag": '"abc"', "size": 3}
-        bridge.put_object.assert_awaited_once_with("bucket-a", "new.txt", b"new")
+        bridge.put_object.assert_awaited_once_with(
+            "bucket-a",
+            "new.txt",
+            b"new",
+            bucket_id="testns/bucket-a",
+            token="hf_test",
+        )
         assert bridge._pool_listing_cache == (0, [])
+
+    async def test_pool_put_object_uses_explicit_bucket_id_and_token(
+        self, bridge, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pool uploads must not rely on shared namespace/token override state."""
+
+        class _Entry:
+            token = "hf_test"
+            namespace = "testns"
+
+        class _Pool:
+            async def acquire(self):
+                return _Entry()
+
+            async def release(self, token: str) -> None:
+                assert token == "hf_test"
+
+            async def resolve_namespace(self, entry, whoami):
+                return entry.namespace
+
+        async def _pool_all_buckets() -> list[dict]:
+            return [{"name": "bucket-a", "namespace": "testns", "token": "hf_test"}]
+
+        bridge._token_pool = _Pool()
+        monkeypatch.setattr(bridge, "_pool_all_buckets", _pool_all_buckets)
+        bridge.put_object = AsyncMock(return_value={"ETag": '"abc"', "size": 3})
+
+        await bridge.pool_put_object("new.txt", b"new")
+
+        bridge.put_object.assert_awaited_once_with(
+            "bucket-a",
+            "new.txt",
+            b"new",
+            bucket_id="testns/bucket-a",
+            token="hf_test",
+        )
+
+
+class TestExplicitUploadToken:
+    async def test_put_object_passes_explicit_token_to_hub_writes(
+        self, bridge, mock_hub: MagicMock, mock_cas: MagicMock
+    ) -> None:
+        """A pool upload's token must stay attached to every upstream write."""
+        mock_hub.get_xet_write_token.return_value = XetConnectionInfo(
+            cas_url="https://cas.example",
+            access_token="xet-token",
+            token_expiration=9999999999,
+        )
+        mock_cas.upload_xorb = AsyncMock()
+        mock_cas.upload_shard = AsyncMock()
+
+        await bridge.put_object(
+            "bucket-a",
+            "new.txt",
+            b"new",
+            bucket_id="testns/bucket-a",
+            token="hf_test",
+        )
+
+        mock_hub.get_xet_write_token.assert_awaited_once_with(
+            "testns/bucket-a",
+            token="hf_test",
+        )
+        batch_call = mock_hub.batch_files.call_args
+        assert batch_call.args[0] == "testns/bucket-a"
+        assert batch_call.kwargs["token"] == "hf_test"

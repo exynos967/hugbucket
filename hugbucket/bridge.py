@@ -527,9 +527,6 @@ class HFStorageBackend:
                 raise RuntimeError("No healthy token available")
             try:
                 ns = entry.namespace or await self._token_pool.resolve_namespace(entry, self.hub.whoami)
-                # Lock hub to this token so downstream calls (get_xet_write_token,
-                # batch_files, etc.) don't acquire a different token from the pool.
-                self.hub._token_override = entry.token
                 # Find or create a bucket for this token
                 my_buckets = [b for b in all_buckets if b["namespace"] == ns]
                 if my_buckets:
@@ -542,25 +539,41 @@ class HFStorageBackend:
                         secrets.choice(string.ascii_lowercase + string.digits)
                         for _ in range(8)
                     )
-                    self.config.hf_namespace = ns
-                    await self.hub.create_bucket(real_bucket)
+                    await self.hub.create_bucket(
+                        real_bucket,
+                        namespace=ns,
+                        token=entry.token,
+                    )
                     self._bucket_ns_cache[real_bucket] = ns
                     self._invalidate_pool_cache()
 
-                self.config.hf_namespace = ns
+                bucket_id = f"{ns}/{real_bucket}"
+                result = await self.put_object(
+                    real_bucket,
+                    key,
+                    data,
+                    bucket_id=bucket_id,
+                    token=entry.token,
+                )
+                self._bucket_ns_cache[real_bucket] = ns
                 self._pool_file_cache[key] = real_bucket
-                result = await self.put_object(real_bucket, key, data)
                 self._invalidate_pool_listing_cache()
                 return result
             finally:
-                self.hub._token_override = None
                 await self._token_pool.release(entry.token)
 
         # Fallback without pool
         first = all_buckets[0]
+        bucket_id = f"{first['namespace']}/{first['name']}"
+        result = await self.put_object(
+            first["name"],
+            key,
+            data,
+            bucket_id=bucket_id,
+            token=first.get("token"),
+        )
+        self._bucket_ns_cache[first["name"]] = first["namespace"]
         self._pool_file_cache[key] = first["name"]
-        self.config.hf_namespace = first["namespace"]
-        result = await self.put_object(first["name"], key, data)
         self._invalidate_pool_listing_cache()
         return result
 
@@ -573,46 +586,125 @@ class HFStorageBackend:
         for b in all_buckets:
             bucket_id = f"{b['namespace']}/{b['name']}"
             try:
-                info = await self.hub.get_paths_info(bucket_id, [key])
+                info = await self.hub.get_paths_info(
+                    bucket_id,
+                    [key],
+                    token=b.get("token"),
+                )
                 if info and info[0].type == "file":
                     self._pool_file_cache[key] = b["name"]
+                    self._bucket_ns_cache[b["name"]] = b["namespace"]
                     return b["name"]
             except Exception:
                 continue
         return None
 
+    async def _pool_route_for_key(self, key: str) -> tuple[str, str, str | None] | None:
+        """Return (bucket_name, bucket_id, token) for a virtual pool key."""
+        bucket_name = await self._pool_find_bucket(key)
+        if bucket_name is None:
+            return None
+
+        namespace = self._bucket_ns_cache.get(bucket_name)
+        if namespace is None:
+            namespace = await self._resolve_bucket_ns(bucket_name)
+        if namespace is None:
+            return None
+
+        token = None
+        if self._token_pool is not None:
+            entry = await self._token_pool.get_token_for_namespace(namespace)
+            if entry is not None:
+                token = entry.token
+
+        return bucket_name, f"{namespace}/{bucket_name}", token
+
     async def pool_get_object(self, key: str) -> bytes | None:
         """Get object from pool — probes real buckets until found."""
-        bucket_name = await self._pool_find_bucket(key)
-        if not bucket_name:
+        route = await self._pool_route_for_key(key)
+        if route is None:
             return None
-        return await self.get_object(bucket_name, key)
+        bucket_name, bucket_id, token = route
+        return await self.get_object(bucket_name, key, bucket_id=bucket_id, token=token)
 
     async def pool_get_object_stream(self, key: str, file_info=None,
                                       byte_range=None):
         """Stream object from pool."""
-        bucket_name = await self._pool_find_bucket(key)
-        if not bucket_name:
+        route = await self._pool_route_for_key(key)
+        if route is None:
             return None
-        return await self.get_object_stream(bucket_name, key, file_info=file_info, byte_range=byte_range)
+        bucket_name, bucket_id, token = route
+        return await self.get_object_stream(
+            bucket_name,
+            key,
+            file_info=file_info,
+            byte_range=byte_range,
+            bucket_id=bucket_id,
+            token=token,
+        )
 
     async def pool_head_object(self, key: str) -> BucketFile | None:
         """Head object in pool."""
-        bucket_name = await self._pool_find_bucket(key)
-        if not bucket_name:
+        route = await self._pool_route_for_key(key)
+        if route is None:
             return None
-        return await self.head_object(bucket_name, key)
+        bucket_name, bucket_id, token = route
+        return await self.head_object(bucket_name, key, bucket_id=bucket_id, token=token)
+
+    async def pool_head_directory(self, prefix: str) -> bool:
+        """Check if a virtual pool directory exists."""
+        marker = await self.pool_head_object(prefix + DIR_MARKER_FILENAME)
+        if marker is not None:
+            return True
+
+        result = await self.pool_list_objects(prefix=prefix, max_keys=1)
+        return bool(result["contents"] or result["common_prefixes"])
 
     async def pool_delete_object(self, key: str) -> None:
         """Delete object from pool."""
-        bucket_name = await self._pool_find_bucket(key)
-        if bucket_name is None:
-            bucket_name = self._pool_file_cache.get(key)
-        if not bucket_name:
+        route = await self._pool_route_for_key(key)
+        if route is None:
             raise FileNotFoundError(key)
-        await self.delete_object(bucket_name, key)
+        bucket_name, bucket_id, token = route
+        await self.delete_object(bucket_name, key, bucket_id=bucket_id, token=token)
         self._pool_file_cache.pop(key, None)
         self._invalidate_pool_listing_cache()
+
+    async def pool_delete_objects(self, keys: list[str]) -> tuple[list[str], list[dict]]:
+        """Delete multiple virtual pool objects."""
+        deleted: list[str] = []
+        errors: list[dict] = []
+        for key in keys:
+            try:
+                await self.pool_delete_object(key)
+                deleted.append(key)
+            except FileNotFoundError:
+                deleted.append(key)
+            except Exception as exc:
+                logger.exception("pool_delete_objects failed for %s", key)
+                errors.append(
+                    {"key": key, "code": "InternalError", "message": str(exc)}
+                )
+        return deleted, errors
+
+    async def pool_copy_object(self, src_key: str, dst_key: str) -> dict:
+        """Copy a virtual pool object within the same underlying real bucket."""
+        route = await self._pool_route_for_key(src_key)
+        if route is None:
+            raise FileNotFoundError(src_key)
+        bucket_name, bucket_id, token = route
+        result = await self.copy_object(
+            bucket_name,
+            src_key,
+            bucket_name,
+            dst_key,
+            src_bucket_id=bucket_id,
+            dst_bucket_id=bucket_id,
+            token=token,
+        )
+        self._pool_file_cache[dst_key] = bucket_name
+        self._invalidate_pool_listing_cache()
+        return result
 
     # ---- Unified bucket pool (all namespaces merged) ------------------------
 
@@ -672,12 +764,18 @@ class HFStorageBackend:
 
     # ---- Cached helpers ----
 
-    async def _get_read_token(self, bucket_id: str) -> XetConnectionInfo:
+    async def _get_read_token(
+        self,
+        bucket_id: str,
+        *,
+        token: str | None = None,
+    ) -> XetConnectionInfo:
         """Return a cached read token, refreshing when close to expiry."""
         cached = self._token_cache.get(bucket_id)
         if cached and cached.token_expiration > time.time() + 60:
             return cached
-        conn = await self.hub.get_xet_read_token(bucket_id)
+        token_kwargs = {"token": token} if token is not None else {}
+        conn = await self.hub.get_xet_read_token(bucket_id, **token_kwargs)
         self._token_cache[bucket_id] = conn
         return conn
 
@@ -699,7 +797,11 @@ class HFStorageBackend:
         return recon
 
     async def _get_file_info_cached(
-        self, bucket_id: str, key: str
+        self,
+        bucket_id: str,
+        key: str,
+        *,
+        token: str | None = None,
     ) -> BucketFile | None:
         """Return cached file metadata, fetching from Hub if stale/missing."""
         cache_key = f"{bucket_id}:{key}"
@@ -710,7 +812,8 @@ class HFStorageBackend:
                 self._file_info_cache.move_to_end(cache_key)
                 return file_info
             del self._file_info_cache[cache_key]
-        files = await self.hub.get_paths_info(bucket_id, [key])
+        token_kwargs = {"token": token} if token is not None else {}
+        files = await self.hub.get_paths_info(bucket_id, [key], **token_kwargs)
         if not files:
             return None
         file_info = files[0]
@@ -773,8 +876,12 @@ class HFStorageBackend:
             entry = await pool.acquire()
             if entry and entry.namespace:
                 try:
-                    self.config.hf_namespace = entry.namespace
-                    url = await self.hub.create_bucket(name, private=private)
+                    url = await self.hub.create_bucket(
+                        name,
+                        private=private,
+                        namespace=entry.namespace,
+                        token=entry.token,
+                    )
                     self._bucket_ns_cache[name] = entry.namespace
                     return url
                 finally:
@@ -809,6 +916,9 @@ class HFStorageBackend:
         bucket: str,
         key: str,
         data: bytes,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
     ) -> dict:
         """Upload an object. Full Xet protocol:
         1. CDC chunk the data
@@ -821,7 +931,7 @@ class HFStorageBackend:
         CPU-bound work (chunking, hashing, compression, MD5) is offloaded
         to a thread so the event loop stays responsive during uploads.
         """
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
         requested_size = len(data)
 
         # S3 clients create "folders" by PUTting a zero-byte object with a
@@ -840,7 +950,7 @@ class HFStorageBackend:
 
         # Handle empty files
         if len(data) == 0:
-            return await self._put_empty_file(bucket_id, key)
+            return await self._put_empty_file(bucket_id, key, token=token)
 
         # Run all CPU-bound work in a thread (chunking, hashing,
         # LZ4 compression, shard building, MD5)
@@ -850,7 +960,8 @@ class HFStorageBackend:
         )
 
         # Get write token (network I/O, stays on event loop)
-        conn = await self.hub.get_xet_write_token(bucket_id)
+        token_kwargs = {"token": token} if token is not None else {}
+        conn = await self.hub.get_xet_write_token(bucket_id, **token_kwargs)
 
         # Upload xorbs to CAS concurrently (network I/O)
         await asyncio.gather(
@@ -881,12 +992,19 @@ class HFStorageBackend:
                     "contentType": content_type,
                 }
             ],
+            **token_kwargs,
         )
 
         self._invalidate_file_info(bucket_id, key)
         return {"ETag": f'"{prepared.etag}"', "size": requested_size}
 
-    async def _put_empty_file(self, bucket_id: str, key: str) -> dict:
+    async def _put_empty_file(
+        self,
+        bucket_id: str,
+        key: str,
+        *,
+        token: str | None = None,
+    ) -> dict:
         """Handle zero-byte file (no Xet upload needed)."""
         # Empty file still needs a file hash
         c_hash = chunk_hash(b"")
@@ -896,6 +1014,7 @@ class HFStorageBackend:
         content_type = mimetypes.guess_type(key)[0] or "application/octet-stream"
         mtime_ms = int(time.time() * 1000)
 
+        token_kwargs = {"token": token} if token is not None else {}
         await self.hub.batch_files(
             bucket_id,
             add=[
@@ -906,6 +1025,7 @@ class HFStorageBackend:
                     "contentType": content_type,
                 }
             ],
+            **token_kwargs,
         )
         self._invalidate_file_info(bucket_id, key)
         etag = hashlib.md5(b"").hexdigest()
@@ -915,6 +1035,9 @@ class HFStorageBackend:
         self,
         bucket: str,
         key: str,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
     ) -> bytes | None:
         """Download an object. Full Xet protocol:
         1. Get file metadata (xetHash, size)
@@ -923,10 +1046,11 @@ class HFStorageBackend:
         4. Fetch xorb ranges from CDN
         5. Decompress + reassemble
         """
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        token_kwargs = {"token": token} if token is not None else {}
 
         # Step 1: Get file info
-        files = await self.hub.get_paths_info(bucket_id, [key])
+        files = await self.hub.get_paths_info(bucket_id, [key], **token_kwargs)
         if not files:
             return None
 
@@ -935,7 +1059,7 @@ class HFStorageBackend:
             return b""
 
         # Step 2: Get read token
-        conn = await self._get_read_token(bucket_id)
+        conn = await self._get_read_token(bucket_id, **token_kwargs)
 
         # Step 3: Get reconstruction
         recon = await self._get_reconstruction(conn, file_info.xet_hash)
@@ -971,6 +1095,9 @@ class HFStorageBackend:
         key: str,
         file_info: BucketFile | None = None,
         byte_range: tuple[int, int] | None = None,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
     ) -> AsyncIterator[bytes] | None:
         """Stream an object chunk by chunk instead of buffering the entire file.
 
@@ -984,10 +1111,11 @@ class HFStorageBackend:
         the CDN, making random-access seeks O(relevant terms) instead
         of O(all terms).
         """
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        token_kwargs = {"token": token} if token is not None else {}
 
         if file_info is None:
-            files = await self.hub.get_paths_info(bucket_id, [key])
+            files = await self.hub.get_paths_info(bucket_id, [key], **token_kwargs)
             if not files:
                 return None
             file_info = files[0]
@@ -999,7 +1127,7 @@ class HFStorageBackend:
 
             return _empty()
 
-        conn = await self._get_read_token(bucket_id)
+        conn = await self._get_read_token(bucket_id, **token_kwargs)
         recon = await self._get_reconstruction(conn, file_info.xet_hash)
 
         # Pre-compute cumulative byte boundaries per term so we can
@@ -1070,25 +1198,39 @@ class HFStorageBackend:
 
         return _stream()
 
-    async def delete_object(self, bucket: str, key: str) -> None:
+    async def delete_object(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
+    ) -> None:
         """Delete an object."""
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        token_kwargs = {"token": token} if token is not None else {}
         keys_to_delete = [key]
         # Directory marker PUTs store a hidden placeholder; delete it too.
         if key.endswith("/"):
             keys_to_delete.append(key + DIR_MARKER_FILENAME)
-        await self.hub.batch_files(bucket_id, delete=keys_to_delete)
+        await self.hub.batch_files(bucket_id, delete=keys_to_delete, **token_kwargs)
         self._invalidate_file_info(bucket_id, key)
 
     async def delete_objects(
-        self, bucket: str, keys: list[str]
+        self,
+        bucket: str,
+        keys: list[str],
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
     ) -> tuple[list[str], list[dict]]:
         """Delete multiple objects in a single batch call.
 
         Returns (deleted_keys, errors) where errors is a list of
         {"key": ..., "code": ..., "message": ...} dicts.
         """
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        token_kwargs = {"token": token} if token is not None else {}
         # Expand directory keys to also delete the marker placeholder
         all_keys = list(keys)
         for key in keys:
@@ -1097,7 +1239,7 @@ class HFStorageBackend:
         deleted: list[str] = []
         errors: list[dict] = []
         try:
-            await self.hub.batch_files(bucket_id, delete=all_keys)
+            await self.hub.batch_files(bucket_id, delete=all_keys, **token_kwargs)
             deleted = list(keys)  # report original keys only
             for key in keys:
                 self._invalidate_file_info(bucket_id, key)
@@ -1111,12 +1253,26 @@ class HFStorageBackend:
                 )
         return deleted, errors
 
-    async def head_object(self, bucket: str, key: str) -> BucketFile | None:
+    async def head_object(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
+    ) -> BucketFile | None:
         """Get object metadata (cached)."""
-        bucket_id = self._bucket_id(bucket)
-        return await self._get_file_info_cached(bucket_id, key)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        return await self._get_file_info_cached(bucket_id, key, token=token)
 
-    async def head_directory(self, bucket: str, prefix: str) -> bool:
+    async def head_directory(
+        self,
+        bucket: str,
+        prefix: str,
+        *,
+        bucket_id: str | None = None,
+        token: str | None = None,
+    ) -> bool:
         """Check if a directory prefix exists.
 
         A directory is considered to exist if:
@@ -1128,18 +1284,24 @@ class HFStorageBackend:
         AWS S3 the console creates a 0-byte object for folders; HugBucket
         stores a hidden marker instead, so we need this fallback.
         """
-        bucket_id = self._bucket_id(bucket)
+        bucket_id = bucket_id or self._bucket_id(bucket)
+        token_kwargs = {"token": token} if token is not None else {}
 
         # Fast path: check for the explicit directory marker
         marker = await self._get_file_info_cached(
-            bucket_id, prefix + DIR_MARKER_FILENAME
+            bucket_id,
+            prefix + DIR_MARKER_FILENAME,
+            **token_kwargs,
         )
         if marker is not None:
             return True
 
         # Slow path: check if any objects exist under this prefix
         all_files = await self.hub.list_bucket_tree(
-            bucket_id, prefix=prefix, recursive=True
+            bucket_id,
+            prefix=prefix,
+            recursive=True,
+            **token_kwargs,
         )
         return len(all_files) > 0
 
@@ -1149,6 +1311,10 @@ class HFStorageBackend:
         src_key: str,
         dst_bucket: str,
         dst_key: str,
+        *,
+        src_bucket_id: str | None = None,
+        dst_bucket_id: str | None = None,
+        token: str | None = None,
     ) -> dict:
         """Copy an object by registering the destination path with the same xetHash.
 
@@ -1158,11 +1324,16 @@ class HFStorageBackend:
 
         Returns {"ETag": ..., "LastModified": ...}.
         """
-        src_bucket_id = self._bucket_id(src_bucket)
-        dst_bucket_id = self._bucket_id(dst_bucket)
+        src_bucket_id = src_bucket_id or self._bucket_id(src_bucket)
+        dst_bucket_id = dst_bucket_id or self._bucket_id(dst_bucket)
+        token_kwargs = {"token": token} if token is not None else {}
 
         # Get source file metadata (using cache)
-        src_file = await self._get_file_info_cached(src_bucket_id, src_key)
+        src_file = await self._get_file_info_cached(
+            src_bucket_id,
+            src_key,
+            **token_kwargs,
+        )
         if not src_file:
             raise FileNotFoundError(f"Source object not found: {src_bucket}/{src_key}")
 
@@ -1180,6 +1351,7 @@ class HFStorageBackend:
                     "contentType": content_type,
                 }
             ],
+            **token_kwargs,
         )
 
         self._invalidate_file_info(dst_bucket_id, dst_key)

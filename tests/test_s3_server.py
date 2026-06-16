@@ -14,7 +14,7 @@ from xml.etree.ElementTree import fromstring
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
+from aiohttp.test_utils import TestClient
 
 from hugbucket.hub.client import BucketInfo, BucketFile
 from hugbucket.s3.server import S3Handler
@@ -35,13 +35,22 @@ def mock_bridge() -> MagicMock:
     bridge.delete_bucket = AsyncMock()
     bridge.head_bucket = AsyncMock(return_value=None)
     bridge.put_object = AsyncMock(return_value={"ETag": '"abc123"', "size": 0})
+    bridge.pool_put_object = AsyncMock(return_value={"ETag": '"abc123"', "size": 0})
     bridge.get_object = AsyncMock(return_value=None)
     bridge.get_object_stream = AsyncMock(return_value=None)
+    bridge.pool_get_object_stream = AsyncMock(return_value=None)
     bridge.delete_object = AsyncMock()
+    bridge.pool_delete_object = AsyncMock()
     bridge.delete_objects = AsyncMock(return_value=([], []))
+    bridge.pool_delete_objects = AsyncMock(return_value=([], []))
     bridge.head_object = AsyncMock(return_value=None)
+    bridge.pool_head_object = AsyncMock(return_value=None)
     bridge.head_directory = AsyncMock(return_value=False)
+    bridge.pool_head_directory = AsyncMock(return_value=False)
     bridge.copy_object = AsyncMock(
+        return_value={"ETag": '"abc123"', "LastModified": "2026-01-01T00:00:00Z"}
+    )
+    bridge.pool_copy_object = AsyncMock(
         return_value={"ETag": '"abc123"', "LastModified": "2026-01-01T00:00:00Z"}
     )
     bridge.list_objects = AsyncMock(
@@ -72,6 +81,23 @@ async def client(aiohttp_client, app: web.Application) -> TestClient:
     return await aiohttp_client(app)
 
 
+@pytest.fixture
+def pool_app(mock_bridge: MagicMock) -> web.Application:
+    """Create aiohttp app in aggregate pool mode."""
+    application = web.Application(client_max_size=16 * 1024 * 1024)
+    application["config"] = MagicMock(pool_bucket_name="pool")
+    application["bridge"] = mock_bridge
+    handler = S3Handler(mock_bridge)
+    handler.setup_routes(application)
+    return application
+
+
+@pytest.fixture
+async def pool_client(aiohttp_client, pool_app: web.Application) -> TestClient:
+    """Create test client for aggregate pool mode."""
+    return await aiohttp_client(pool_app)
+
+
 class TestListBuckets:
     async def test_empty_list(self, client: TestClient) -> None:
         resp = await client.get("/")
@@ -95,6 +121,96 @@ class TestListBuckets:
         assert resp.status == 200
         body = await resp.text()
         assert "my-bucket" in body
+
+
+class TestPoolMode:
+    async def test_list_buckets_exposes_only_virtual_pool(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.get("/")
+        assert resp.status == 200
+        body = await resp.text()
+        assert "pool" in body
+        mock_bridge.list_buckets.assert_not_awaited()
+
+    async def test_non_pool_bucket_is_rejected(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.put("/real-bucket/file.txt", data=b"hello")
+        assert resp.status == 404
+        assert "NoSuchBucket" in await resp.text()
+        mock_bridge.put_object.assert_not_awaited()
+        mock_bridge.pool_put_object.assert_not_awaited()
+
+    async def test_create_virtual_pool_bucket_is_noop(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.put("/pool")
+        assert resp.status == 200
+        mock_bridge.create_bucket.assert_not_awaited()
+
+    async def test_delete_virtual_pool_bucket_is_noop(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.delete("/pool")
+        assert resp.status == 204
+        mock_bridge.delete_bucket.assert_not_awaited()
+
+    async def test_pool_put_uses_pool_bridge(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.put("/pool/file.txt", data=b"hello")
+        assert resp.status == 200
+        mock_bridge.pool_put_object.assert_awaited_once_with("file.txt", b"hello")
+        mock_bridge.put_object.assert_not_awaited()
+
+    async def test_pool_batch_delete_uses_pool_bridge(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        body = (
+            b"<Delete><Object><Key>a.txt</Key></Object>"
+            b"<Object><Key>b.txt</Key></Object></Delete>"
+        )
+        mock_bridge.pool_delete_objects.return_value = (["a.txt", "b.txt"], [])
+        resp = await pool_client.post("/pool?delete", data=body)
+        assert resp.status == 200
+        mock_bridge.pool_delete_objects.assert_awaited_once_with(["a.txt", "b.txt"])
+        mock_bridge.delete_objects.assert_not_awaited()
+
+    async def test_pool_copy_uses_pool_bridge(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        resp = await pool_client.put(
+            "/pool/new.txt",
+            headers={"x-amz-copy-source": "/pool/old.txt"},
+        )
+        assert resp.status == 200
+        mock_bridge.pool_copy_object.assert_awaited_once_with("old.txt", "new.txt")
+        mock_bridge.copy_object.assert_not_awaited()
+
+    async def test_pool_multipart_complete_uses_pool_bridge(
+        self, pool_client: TestClient, mock_bridge: MagicMock
+    ) -> None:
+        init = await pool_client.post("/pool/big.bin?uploads")
+        assert init.status == 200
+        upload_id = fromstring(await init.read()).findtext(
+            "{http://s3.amazonaws.com/doc/2006-03-01/}UploadId"
+        )
+        assert upload_id
+
+        part = await pool_client.put(
+            f"/pool/big.bin?partNumber=1&uploadId={upload_id}",
+            data=b"hello",
+        )
+        assert part.status == 200
+
+        complete = await pool_client.post(
+            f"/pool/big.bin?uploadId={upload_id}",
+            data=b"<CompleteMultipartUpload/>",
+        )
+        assert complete.status == 200
+        mock_bridge.pool_put_object.assert_awaited_once_with("big.bin", b"hello")
+        mock_bridge.put_object.assert_not_awaited()
 
 
 class TestBucketOps:

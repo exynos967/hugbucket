@@ -264,8 +264,11 @@ async def handle_create_bucket(request: web.Request) -> web.Response:
         config = request.app["config"]
         config.hf_namespace = entry.namespace
         try:
-            bridge.config.hf_namespace = entry.namespace
-            url = await bridge.hub.create_bucket(name)
+            url = await bridge.hub.create_bucket(
+                name,
+                namespace=entry.namespace,
+                token=entry.token,
+            )
             bridge._bucket_ns_cache[name] = entry.namespace
             return _json({"ok": True, "url": url, "namespace": entry.namespace}, status=201)
         except Exception as e:
@@ -321,8 +324,12 @@ async def handle_ensure_buckets(request: web.Request) -> web.Response:
         # No buckets — create one
         random_name = "".join(secrets.choice(alphabet) for _ in range(8))
         try:
-            bridge.config.hf_namespace = entry.namespace
-            await bridge.hub.create_bucket(random_name, private=private)
+            await bridge.hub.create_bucket(
+                random_name,
+                private=private,
+                namespace=entry.namespace,
+                token=entry.token,
+            )
             bridge._bucket_ns_cache[random_name] = entry.namespace
             result.append({"namespace": entry.namespace, "label": entry.label, "status": "created", "bucket": random_name})
         except Exception as e:
