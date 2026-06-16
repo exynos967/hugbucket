@@ -13,12 +13,12 @@ from collections.abc import AsyncIterator
 import logging
 import mimetypes
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from hugbucket.config import Config
 from hugbucket.hub.client import HubClient, BucketInfo, BucketFile, XetConnectionInfo
 from hugbucket.xet.cas_client import CASClient, Reconstruction, ReconstructionTerm
-from hugbucket.xet.chunker import Chunk, chunk_data
+from hugbucket.xet.chunker import chunk_data
 from hugbucket.xet.hasher import (
     chunk_hash,
     file_hash,
@@ -31,7 +31,6 @@ from hugbucket.xet.xorb import (
     deserialize_xorb,
     ChunkEntry,
     XORB_MAX_BYTES,
-    XorbChunkOffset,
 )
 from hugbucket.xet.shard import (
     FileInfo,
@@ -387,7 +386,11 @@ class HFStorageBackend:
     def _invalidate_pool_cache(self) -> None:
         """Clear pool bucket cache (call after creating/deleting a bucket)."""
         self._pool_buckets_cache = (0, [])
-        self._pool_listing_cache = (0, [])  # also invalidate file listing
+        self._invalidate_pool_listing_cache()
+
+    def _invalidate_pool_listing_cache(self) -> None:
+        """Clear cached pool file listing after object mutations."""
+        self._pool_listing_cache = (0, [])
 
     async def _refresh_pool_listing(self) -> None:
         """Fetch FULL file listing from all buckets and cache it.
@@ -397,8 +400,8 @@ class HFStorageBackend:
         """
         all_buckets = await self._pool_all_buckets()
 
-        async def _fetch_one(b: dict) -> list[BucketFile]:
-            result: list[BucketFile] = []
+        async def _fetch_one(b: dict) -> list[tuple[str, BucketFile]]:
+            result: list[tuple[str, BucketFile]] = []
             bucket_id = f"{b['namespace']}/{b['name']}"
             try:
                 files = await self.hub.list_bucket_tree(
@@ -407,8 +410,7 @@ class HFStorageBackend:
                 for f in files:
                     if f.type != "file":
                         continue
-                    f.path = b["name"] + "/" + f.path
-                    result.append(f)
+                    result.append((b["name"], replace(f)))
             except Exception:
                 logger.warning("Failed to list %s", bucket_id, exc_info=True)
             return result
@@ -416,8 +418,19 @@ class HFStorageBackend:
         tasks = [_fetch_one(b) for b in all_buckets]
         results = await asyncio.gather(*tasks)
         all_contents: list[BucketFile] = []
+        seen_keys: set[str] = set()
         for r in results:
-            all_contents.extend(r)
+            for bucket_name, f in r:
+                if f.path in seen_keys:
+                    logger.warning(
+                        "Duplicate pool key %s found in bucket %s; keeping first",
+                        f.path,
+                        bucket_name,
+                    )
+                    continue
+                seen_keys.add(f.path)
+                self._pool_file_cache[f.path] = bucket_name
+                all_contents.append(f)
 
         all_contents.sort(key=lambda f: f.path)
         self._pool_listing_cache = (time.monotonic(), all_contents)
@@ -435,13 +448,16 @@ class HFStorageBackend:
         Triggers a background refresh when the cache is stale (>60 s).
         """
         now = time.monotonic()
-        cache_age = now - self._pool_listing_cache[0]
+        cache_ts = self._pool_listing_cache[0]
+        cache_initialized = cache_ts > 0
+        cache_age = now - cache_ts if cache_initialized else float("inf")
         need_refresh = cache_age > 60
 
-        if not self._pool_listing_cache[1]:
-            # Empty cache — must do a blocking fetch (first request)
+        if not cache_initialized:
+            # Cold cache — must do a blocking fetch (first request).
+            # A warmed cache can legitimately contain zero files.
             async with self._pool_listing_lock:
-                if not self._pool_listing_cache[1]:
+                if self._pool_listing_cache[0] <= 0:
                     await self._refresh_pool_listing()
                     need_refresh = False
         elif need_refresh and not self._pool_listing_lock.locked():
@@ -519,8 +535,13 @@ class HFStorageBackend:
                 if my_buckets:
                     real_bucket = my_buckets[0]["name"]
                 else:
-                    import secrets, string
-                    real_bucket = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+                    import secrets
+                    import string
+
+                    real_bucket = "".join(
+                        secrets.choice(string.ascii_lowercase + string.digits)
+                        for _ in range(8)
+                    )
                     self.config.hf_namespace = ns
                     await self.hub.create_bucket(real_bucket)
                     self._bucket_ns_cache[real_bucket] = ns
@@ -528,7 +549,9 @@ class HFStorageBackend:
 
                 self.config.hf_namespace = ns
                 self._pool_file_cache[key] = real_bucket
-                return await self.put_object(real_bucket, key, data)
+                result = await self.put_object(real_bucket, key, data)
+                self._invalidate_pool_listing_cache()
+                return result
             finally:
                 self.hub._token_override = None
                 await self._token_pool.release(entry.token)
@@ -537,7 +560,9 @@ class HFStorageBackend:
         first = all_buckets[0]
         self._pool_file_cache[key] = first["name"]
         self.config.hf_namespace = first["namespace"]
-        return await self.put_object(first["name"], key, data)
+        result = await self.put_object(first["name"], key, data)
+        self._invalidate_pool_listing_cache()
+        return result
 
     async def _pool_find_bucket(self, key: str) -> str | None:
         """Find which real bucket contains *key*. Returns bucket name or None."""
@@ -587,7 +612,7 @@ class HFStorageBackend:
             raise FileNotFoundError(key)
         await self.delete_object(bucket_name, key)
         self._pool_file_cache.pop(key, None)
-        self._pool_listing_cache = (0, [])  # force refresh on next list
+        self._invalidate_pool_listing_cache()
 
     # ---- Unified bucket pool (all namespaces merged) ------------------------
 

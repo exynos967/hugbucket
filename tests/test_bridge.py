@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
-from unittest.mock import AsyncMock, MagicMock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -224,3 +224,114 @@ class TestCopyObject:
         call_args = mock_hub.batch_files.call_args
         add_list = call_args.kwargs.get("add") or call_args[1].get("add")
         assert add_list[0]["contentType"] == "image/jpeg"
+
+
+class TestPoolListingCache:
+    async def test_pool_listing_exposes_object_keys_without_bucket_prefix(
+        self, bridge, mock_hub: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The virtual pool bucket should not leak real bucket names in keys."""
+
+        async def _pool_all_buckets() -> list[dict]:
+            return [{"name": "bucket-a", "namespace": "testns", "token": "hf_test"}]
+
+        monkeypatch.setattr(bridge, "_pool_all_buckets", _pool_all_buckets)
+        mock_hub.list_bucket_tree = AsyncMock(return_value=[
+            BucketFile(
+                type="file",
+                path="root.txt",
+                size=4,
+                xet_hash="a" * 64,
+                mtime="2026-01-01T00:00:00Z",
+            ),
+            BucketFile(
+                type="file",
+                path="dir/nested.txt",
+                size=6,
+                xet_hash="b" * 64,
+                mtime="2026-01-01T00:00:00Z",
+            ),
+        ])
+
+        await bridge._refresh_pool_listing()
+        result = await bridge.pool_list_objects(delimiter="/")
+
+        assert [f.path for f in result["contents"]] == ["root.txt"]
+        assert result["common_prefixes"] == ["dir/"]
+        assert bridge._pool_file_cache["root.txt"] == "bucket-a"
+        assert bridge._pool_file_cache["dir/nested.txt"] == "bucket-a"
+
+    async def test_pool_upload_remains_visible_at_original_key_after_refresh(
+        self, bridge, mock_hub: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Uploading foo.txt to the pool must list foo.txt, not bucket/foo.txt."""
+
+        async def _pool_all_buckets() -> list[dict]:
+            return [{"name": "bucket-a", "namespace": "testns", "token": "hf_test"}]
+
+        monkeypatch.setattr(bridge, "_pool_all_buckets", _pool_all_buckets)
+        bridge.put_object = AsyncMock(return_value={"ETag": '"abc"', "size": 3})
+        mock_hub.list_bucket_tree = AsyncMock(return_value=[
+            BucketFile(
+                type="file",
+                path="foo.txt",
+                size=3,
+                xet_hash="c" * 64,
+                mtime="2026-01-01T00:00:00Z",
+            )
+        ])
+
+        await bridge.pool_put_object("foo.txt", b"foo")
+        result = await bridge.pool_list_objects()
+
+        assert [f.path for f in result["contents"]] == ["foo.txt"]
+        assert result["common_prefixes"] == []
+
+    async def test_empty_pool_listing_cache_is_reused_within_ttl(
+        self, bridge, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty-but-warmed pool listing must not refresh on every list."""
+        refresh_count = 0
+
+        async def _refresh() -> None:
+            nonlocal refresh_count
+            refresh_count += 1
+            bridge._pool_listing_cache = (time.monotonic(), [])
+
+        monkeypatch.setattr(bridge, "_refresh_pool_listing", _refresh)
+
+        first = await bridge.pool_list_objects()
+        second = await bridge.pool_list_objects()
+
+        assert first["contents"] == []
+        assert second["contents"] == []
+        assert refresh_count == 1
+
+    async def test_pool_put_object_invalidates_listing_cache(
+        self, bridge, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful pool upload must be visible to the next list call."""
+        bridge._pool_listing_cache = (
+            time.monotonic(),
+            [
+                BucketFile(
+                    type="file",
+                    path="bucket-a/old.txt",
+                    size=1,
+                    xet_hash="a" * 64,
+                    mtime="2026-01-01T00:00:00Z",
+                )
+            ],
+        )
+
+        async def _pool_all_buckets() -> list[dict]:
+            return [{"name": "bucket-a", "namespace": "testns", "token": "hf_test"}]
+
+        monkeypatch.setattr(bridge, "_pool_all_buckets", _pool_all_buckets)
+        bridge.put_object = AsyncMock(return_value={"ETag": '"abc"', "size": 3})
+
+        result = await bridge.pool_put_object("new.txt", b"new")
+
+        assert result == {"ETag": '"abc"', "size": 3}
+        bridge.put_object.assert_awaited_once_with("bucket-a", "new.txt", b"new")
+        assert bridge._pool_listing_cache == (0, [])
