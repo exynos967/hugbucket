@@ -53,6 +53,7 @@ def create_app(
 
     # ── Routes (order = priority) ────────────────────────────────────────
     _register_admin_routes(app)
+    app.router.add_get("/healthz", _healthz_handler)
     app.router.add_get("/admin", _dashboard_handler)
     handler.setup_routes(app)
 
@@ -132,6 +133,10 @@ def create_app(
 
 async def _dashboard_handler(_request: web.Request) -> web.Response:
     return web.Response(text=_DASHBOARD_HTML, content_type="text/html")
+
+
+async def _healthz_handler(_request: web.Request) -> web.Response:
+    return web.json_response({"ok": True})
 
 
 def _register_admin_routes(app: web.Application) -> None:

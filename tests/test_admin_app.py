@@ -79,6 +79,27 @@ async def test_admin_api_still_requires_admin_cookie(aiohttp_client) -> None:
     assert await resp.json() == {"error": "unauthorized"}
 
 
+async def test_healthz_bypasses_admin_and_s3_auth(aiohttp_client) -> None:
+    """Container health checks must not require an admin session or AWS auth."""
+    backend = MagicMock()
+    backend.close = AsyncMock()
+    app = create_app(
+        config=Config(
+            admin_password="secret",
+            s3_access_key="access",
+            s3_secret_key="secret-key",
+        ),
+        backend=backend,
+        token_pool=None,
+    )
+
+    client = await aiohttp_client(app)
+    resp = await client.get("/healthz")
+
+    assert resp.status == 200
+    assert await resp.json() == {"ok": True}
+
+
 async def test_logged_in_admin_api_bypasses_s3_auth(aiohttp_client) -> None:
     """Logged-in admin API calls should work without AWS SigV4 headers."""
     backend = MagicMock()
