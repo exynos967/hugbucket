@@ -43,6 +43,7 @@ class HubClient:
     _session: aiohttp.ClientSession | None = field(default=None, repr=False)
     _token_getter: Callable[[], str] | None = field(default=None, repr=False)
     _token_releaser: Callable[[bool], None] | None = field(default=None, repr=False)
+    _token_override: str | None = field(default=None, repr=False)
 
     def _get_token(self) -> str:
         if self._token_getter is not None:
@@ -72,6 +73,8 @@ class HubClient:
         return {"User-Agent": "hugbucket/0.1.0"}
 
     def _auth_headers(self) -> dict[str, str]:
+        if self._token_override is not None:
+            return {"Authorization": f"Bearer {self._token_override}"}
         token = self._get_token()
         if token:
             return {"Authorization": f"Bearer {token}"}

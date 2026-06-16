@@ -511,6 +511,9 @@ class HFStorageBackend:
                 raise RuntimeError("No healthy token available")
             try:
                 ns = entry.namespace or await self._token_pool.resolve_namespace(entry, self.hub.whoami)
+                # Lock hub to this token so downstream calls (get_xet_write_token,
+                # batch_files, etc.) don't acquire a different token from the pool.
+                self.hub._token_override = entry.token
                 # Find or create a bucket for this token
                 my_buckets = [b for b in all_buckets if b["namespace"] == ns]
                 if my_buckets:
@@ -527,6 +530,7 @@ class HFStorageBackend:
                 self._pool_file_cache[key] = real_bucket
                 return await self.put_object(real_bucket, key, data)
             finally:
+                self.hub._token_override = None
                 await self._token_pool.release(entry.token)
 
         # Fallback without pool
