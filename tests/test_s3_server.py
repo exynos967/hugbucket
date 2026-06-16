@@ -59,6 +59,8 @@ def mock_bridge() -> MagicMock:
 def app(mock_bridge: MagicMock) -> web.Application:
     """Create aiohttp app with S3 handler."""
     application = web.Application(client_max_size=16 * 1024 * 1024)
+    application["config"] = MagicMock(pool_bucket_name="")
+    application["bridge"] = mock_bridge
     handler = S3Handler(mock_bridge)
     handler.setup_routes(application)
     return application

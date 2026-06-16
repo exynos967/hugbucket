@@ -347,6 +347,13 @@ class HFStorageBackend:
         default_factory=lambda: (0, []), init=False, repr=False
     )
 
+    # Full pool file listing cache — all files across all buckets, pre-prefixed.
+    # pool_list_objects filters this in-memory for sub-millisecond responses.
+    _pool_listing_cache: tuple[float, list[BucketFile]] = field(
+        default_factory=lambda: (0, []), init=False, repr=False
+    )
+    _pool_listing_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
     async def _pool_all_buckets(self) -> list[dict]:
         """Return [(name, namespace, token), ...] for all real buckets.
 
@@ -380,20 +387,23 @@ class HFStorageBackend:
     def _invalidate_pool_cache(self) -> None:
         """Clear pool bucket cache (call after creating/deleting a bucket)."""
         self._pool_buckets_cache = (0, [])
+        self._pool_listing_cache = (0, [])  # also invalidate file listing
 
-    async def pool_list_objects(self, prefix: str = "", delimiter: str = "",
-                                 max_keys: int = 1000,
-                                 continuation_token: str = "") -> dict:
-        """Aggregate objects from all real buckets, keyed by bucket name."""
+    async def _refresh_pool_listing(self) -> None:
+        """Fetch FULL file listing from all buckets and cache it.
+
+        Must be called with _pool_listing_lock held or when no concurrent
+        callers exist (e.g. startup).
+        """
         all_buckets = await self._pool_all_buckets()
-        all_contents: list[BucketFile] = []
 
-        # Fetch all bucket trees in parallel
         async def _fetch_one(b: dict) -> list[BucketFile]:
             result: list[BucketFile] = []
             bucket_id = f"{b['namespace']}/{b['name']}"
             try:
-                files = await self.hub.list_bucket_tree(bucket_id, recursive=True, token=b["token"])
+                files = await self.hub.list_bucket_tree(
+                    bucket_id, recursive=True, token=b["token"]
+                )
                 for f in files:
                     if f.type != "file":
                         continue
@@ -405,10 +415,42 @@ class HFStorageBackend:
 
         tasks = [_fetch_one(b) for b in all_buckets]
         results = await asyncio.gather(*tasks)
+        all_contents: list[BucketFile] = []
         for r in results:
             all_contents.extend(r)
 
-        # Apply S3-style prefix/delimiter filtering
+        all_contents.sort(key=lambda f: f.path)
+        self._pool_listing_cache = (time.monotonic(), all_contents)
+        logger.info(
+            "Pool listing refreshed: %d files across %d buckets",
+            len(all_contents), len(all_buckets),
+        )
+
+    async def pool_list_objects(self, prefix: str = "", delimiter: str = "",
+                                 max_keys: int = 1000,
+                                 continuation_token: str = "") -> dict:
+        """Aggregate objects from all real buckets, keyed by bucket name.
+
+        Returns from an in-memory cache of the full file listing.
+        Triggers a background refresh when the cache is stale (>60 s).
+        """
+        now = time.monotonic()
+        cache_age = now - self._pool_listing_cache[0]
+        need_refresh = cache_age > 60
+
+        if not self._pool_listing_cache[1]:
+            # Empty cache — must do a blocking fetch (first request)
+            async with self._pool_listing_lock:
+                if not self._pool_listing_cache[1]:
+                    await self._refresh_pool_listing()
+                    need_refresh = False
+        elif need_refresh and not self._pool_listing_lock.locked():
+            # Stale cache, no refresh in progress — trigger background refresh
+            asyncio.ensure_future(self._bg_refresh_listing())
+
+        all_contents = self._pool_listing_cache[1]
+
+        # Apply S3-style prefix/delimiter filtering (pure in-memory)
         filtered = [f for f in all_contents if f.path.startswith(prefix)]
         contents: list[BucketFile] = []
         common_prefixes: set[str] = set()
@@ -422,9 +464,8 @@ class HFStorageBackend:
                 else:
                     contents.append(f)
         else:
-            contents = [f for f in filtered]
+            contents = filtered
 
-        contents.sort(key=lambda f: f.path)
         sorted_prefixes = sorted(common_prefixes)
 
         # Pagination
@@ -445,6 +486,17 @@ class HFStorageBackend:
             "is_truncated": truncated,
             "next_continuation_token": next_token,
         }
+
+    async def _bg_refresh_listing(self) -> None:
+        """Background refresh with lock guard."""
+        async with self._pool_listing_lock:
+            # Re-check staleness under lock — another refresh may have finished
+            if (time.monotonic() - self._pool_listing_cache[0]) <= 60:
+                return
+            try:
+                await self._refresh_pool_listing()
+            except Exception:
+                logger.warning("Background pool listing refresh failed", exc_info=True)
 
     async def pool_put_object(self, key: str, data: bytes) -> dict:
         """Write to the least-in-flight real bucket, recording mapping."""
@@ -531,6 +583,7 @@ class HFStorageBackend:
             raise FileNotFoundError(key)
         await self.delete_object(bucket_name, key)
         self._pool_file_cache.pop(key, None)
+        self._pool_listing_cache = (0, [])  # force refresh on next list
 
     # ---- Unified bucket pool (all namespaces merged) ------------------------
 

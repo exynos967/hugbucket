@@ -46,15 +46,6 @@ async def bridge(config: Config, hf_token: str):
     os.unlink(tmp_path)
 
 
-# Unique bucket name per test run to avoid collisions
-        finally:
-            await bridge.delete_bucket(bucket_name)
-
-    async def test_list_buckets(self, bridge: Bridge) -> None:
-        buckets = await bridge.list_buckets()
-        assert isinstance(buckets, list)
-
-
 @pytest.mark.integration
 class TestUploadDownload:
     """Test file upload/download with integrity verification."""

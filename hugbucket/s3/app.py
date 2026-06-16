@@ -92,9 +92,23 @@ def create_app(
             except Exception as exc:
                 logger.error("Failed to resolve HF namespace: %s", exc)
 
-        # Warm pool bucket cache in background so first S3 request is fast
+        # Warm pool listing cache in background so first S3 request is instant.
+        # Block startup until cache is ready (with generous timeout).
         if config.pool_bucket_name:
-            asyncio.ensure_future(backend._pool_all_buckets())
+            try:
+                await asyncio.wait_for(
+                    backend._refresh_pool_listing(), timeout=30
+                )
+                logger.info("  Pool listing cache warmed up ✓")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "  Pool listing warm-up timed out — first request may be slow"
+                )
+            except Exception:
+                logger.warning(
+                    "  Pool listing warm-up failed — first request may be slow",
+                    exc_info=True,
+                )
 
         logger.info("=" * 60)
         logger.info("  HugBucket: http://%s:%s", config.host, config.port)
